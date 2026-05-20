@@ -22,30 +22,31 @@ data "aws_iam_policy_document" "node_assume_role" {
   }
 }
 
-resource "aws_iam_role" "node" {
+resource "aws_iam_role" "node_group" {
   name               = "${var.cluster_name}-${var.node_group_name}-node-role"
   assume_role_policy = data.aws_iam_policy_document.node_assume_role.json
 
   tags = var.tags
 }
 
-resource "aws_iam_role_policy_attachment" "worker_node" {
+resource "aws_iam_role_policy_attachment" "worker_node_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-  role       = aws_iam_role.node.name
+  role       = aws_iam_role.node_group.name
 }
 
-resource "aws_iam_role_policy_attachment" "cni" {
+resource "aws_iam_role_policy_attachment" "cni_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-  role       = aws_iam_role.node.name
+  role       = aws_iam_role.node_group.name
 }
 
-resource "aws_iam_role_policy_attachment" "ecr_read_only" {
+resource "aws_iam_role_policy_attachment" "ecr_read_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-  role       = aws_iam_role.node.name
+  role       = aws_iam_role.node_group.name
 }
 
-resource "aws_launch_template" "node" {
-  name_prefix = "${var.cluster_name}-${var.node_group_name}-"
+resource "aws_launch_template" "node_group" {
+  name_prefix   = "${var.cluster_name}-${var.node_group_name}-"
+  instance_type = var.instance_types[0]
 
   block_device_mappings {
     device_name = "/dev/xvda"
@@ -82,7 +83,7 @@ resource "aws_launch_template" "node" {
 resource "aws_eks_node_group" "this" {
   cluster_name    = var.cluster_name
   node_group_name = var.node_group_name
-  node_role_arn   = aws_iam_role.node.arn
+  node_role_arn   = aws_iam_role.node_group.arn
   subnet_ids      = var.subnet_ids
 
   ami_type       = var.ami_type
@@ -94,15 +95,19 @@ resource "aws_eks_node_group" "this" {
     desired_size = var.desired_size
   }
 
+  update_config {
+    max_unavailable = 1
+  }
+
   launch_template {
-    id      = aws_launch_template.node.id
-    version = aws_launch_template.node.latest_version
+    id      = aws_launch_template.node_group.id
+    version = aws_launch_template.node_group.latest_version
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.worker_node,
-    aws_iam_role_policy_attachment.cni,
-    aws_iam_role_policy_attachment.ecr_read_only,
+    aws_iam_role_policy_attachment.worker_node_policy,
+    aws_iam_role_policy_attachment.cni_policy,
+    aws_iam_role_policy_attachment.ecr_read_policy,
   ]
 
   tags = var.tags

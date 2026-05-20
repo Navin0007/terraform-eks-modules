@@ -1,27 +1,33 @@
 variable "cluster_name" {
-  description = "Name of the EKS cluster to attach the node group to."
+  description = "EKS cluster name (from eks-cluster module output)."
   type        = string
 }
 
 variable "node_group_name" {
-  description = "Name of the managed node group."
+  description = "Unique managed node group name within the cluster."
   type        = string
 }
 
 variable "subnet_ids" {
-  description = "Subnet IDs for worker nodes (typically private subnets)."
+  description = "Private subnet IDs for worker nodes."
   type        = list(string)
 }
 
 variable "instance_types" {
-  description = "EC2 instance types for the node group."
+  description = "EC2 instance types for the node group (e.g. [\"t3.medium\"])."
   type        = list(string)
 }
 
+variable "ami_type" {
+  description = "EKS-managed AMI type for the node group."
+  type        = string
+  default     = "AL2_x86_64"
+}
+
 variable "disk_size_gb" {
-  description = "Root volume size in GiB for worker nodes."
+  description = "Root EBS volume size in GiB."
   type        = number
-  default     = 50
+  default     = 20
 }
 
 variable "min_size" {
@@ -37,12 +43,6 @@ variable "max_size" {
 variable "desired_size" {
   description = "Desired number of nodes in the autoscaling group."
   type        = number
-}
-
-variable "ami_type" {
-  description = "AMI type for the node group (e.g. AL2_x86_64, AL2023_x86_64_STANDARD)."
-  type        = string
-  default     = "AL2023_x86_64_STANDARD"
 }
 
 variable "tags" {
