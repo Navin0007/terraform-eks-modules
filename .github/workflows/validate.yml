@@ -1,0 +1,62 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+
+      - run: terraform fmt -check -recursive
+
+  validate:
+    runs-on: ubuntu-latest
+    needs: fmt
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - eks-cluster
+          - eks-node-group
+          - eks-addons
+          - eks-rbac
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+
+      - name: Terraform init
+        working-directory: modules/${{ matrix.module }}
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        working-directory: modules/${{ matrix.module }}
+        run: terraform validate
+
+  tflint:
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: Init TFLint
+        run: tflint --init
+
+      - name: Run TFLint
+        run: tflint --recursive
