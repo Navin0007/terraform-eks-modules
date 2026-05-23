@@ -95,12 +95,14 @@ Re-run `terraform plan` after changes; bootstrap updates are rare and should be 
 
 ## GitHub Actions
 
-The workflow [`.github/workflows/bootstrap.yml`](../../.github/workflows/bootstrap.yml) runs on pull requests and pushes that touch `global/bootstrap/`.
+The workflow [`.github/workflows/terraform.yml`](../../.github/workflows/terraform.yml) runs on pull requests and pushes that change Terraform files.
 
 | Job | When | AWS required |
 |-----|------|----------------|
-| **Validate** | Every PR / push to `main` | No — `terraform fmt`, `init`, `validate`, and TFLint |
-| **Plan** | Manual: Actions → Bootstrap → Run workflow, enable **Run terraform plan** | Yes — OIDC role and repository variables |
+| **Format** | Every PR / push to `main` | No — `terraform fmt -check -recursive` |
+| **Validate** | Every PR / push to `main` | No — `terraform init` and `validate` per root module |
+| **TFLint** | Every PR / push to `main` | No |
+| **Plan** | Manual: Actions → Terraform → Run workflow, enable **Run terraform plan** | Yes — OIDC role and repository variables |
 
 ### Repository setup for plan (optional)
 

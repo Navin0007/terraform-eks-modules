@@ -1,19 +1,31 @@
-name: Bootstrap
+name: Terraform
 
 on:
   pull_request:
     paths:
-      - "global/bootstrap/**"
-      - ".github/workflows/bootstrap.yml"
+      - "**/*.tf"
+      - "**/.terraform.lock.hcl"
+      - ".terraform-version"
+      - ".tflint.hcl"
+      - ".github/workflows/terraform.yml"
   push:
     branches: [main]
     paths:
-      - "global/bootstrap/**"
-      - ".github/workflows/bootstrap.yml"
+      - "**/*.tf"
+      - "**/.terraform.lock.hcl"
+      - ".terraform-version"
+      - ".tflint.hcl"
+      - ".github/workflows/terraform.yml"
   workflow_dispatch:
     inputs:
+      working_directory:
+        description: "Terraform root module to plan"
+        type: choice
+        default: global/bootstrap
+        options:
+          - global/bootstrap
       run_plan:
-        description: "Run terraform plan against AWS (requires OIDC secrets)"
+        description: "Run terraform plan against AWS (requires OIDC)"
         type: boolean
         default: false
 
@@ -23,15 +35,11 @@ permissions:
 
 env:
   TF_IN_AUTOMATION: "true"
-  TF_WORKING_DIR: global/bootstrap
 
 jobs:
-  validate:
-    name: Validate
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ env.TF_WORKING_DIR }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,17 +47,47 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.7.5"
+          terraform_version_file: .terraform-version
           terraform_wrapper: false
 
       - name: Terraform Format
         run: terraform fmt -check -recursive
+
+  validate:
+    name: Validate (${{ matrix.working_directory }})
+    needs: fmt
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        working_directory:
+          - global/bootstrap
+    defaults:
+      run:
+        working-directory: ${{ matrix.working_directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version_file: .terraform-version
+          terraform_wrapper: false
 
       - name: Terraform Init
         run: terraform init -backend=false
 
       - name: Terraform Validate
         run: terraform validate
+
+  tflint:
+    name: TFLint
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
@@ -60,17 +98,17 @@ jobs:
         run: tflint --init
 
       - name: TFLint
-        run: tflint
+        run: tflint -f compact
 
   plan:
-    name: Plan
+    name: Plan (${{ github.event.inputs.working_directory }})
     needs: validate
     if: github.event_name == 'workflow_dispatch' && inputs.run_plan
     runs-on: ubuntu-latest
     environment: bootstrap
     defaults:
       run:
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        working-directory: ${{ github.event.inputs.working_directory }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,7 +122,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.7.5"
+          terraform_version_file: .terraform-version
           terraform_wrapper: false
 
       - name: Terraform Init
