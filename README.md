@@ -12,6 +12,7 @@ Terraform modules for EKS infrastructure on AWS.
 | [sg](modules/sg) | Security groups |
 | [addons](modules/addons) | Cluster add-ons |
 | [bootstrap](global/bootstrap) | Remote state bootstrap (S3, DynamoDB, KMS) |
+| [policies](global/policies) | Shared IAM managed policies for EKS and add-ons |
 
 ## Usage
 

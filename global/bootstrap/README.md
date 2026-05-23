@@ -100,7 +100,7 @@ The workflow [`.github/workflows/terraform.yml`](../../.github/workflows/terrafo
 | Job | When | AWS required |
 |-----|------|----------------|
 | **Format** | Every PR / push to `main` | No — `terraform fmt -check -recursive` |
-| **Validate** | Every PR / push to `main` | No — `terraform init` and `validate` per root module |
+| **Validate** | Every PR / push to `main` | No — `terraform init` and `validate` for `global/bootstrap` and `global/policies` |
 | **TFLint** | Every PR / push to `main` | No |
 | **Plan** | Manual: Actions → Terraform → Run workflow, enable **Run terraform plan** | Yes — OIDC role and repository variables |
 
@@ -111,6 +111,6 @@ The workflow [`.github/workflows/terraform.yml`](../../.github/workflows/terrafo
 3. In GitHub: **Settings → Secrets and variables → Actions**
    - Secret: `AWS_ROLE_ARN` — role ARN from step 1
    - Variables: `AWS_REGION`, `AWS_ACCOUNT_ID`, `TF_PROJECT_NAME`, `TF_ENVIRONMENT`
-4. Create a GitHub **environment** named `bootstrap` if you use protection rules for plan jobs.
+4. Create GitHub **environments** named `bootstrap` and `policies` if you use protection rules for plan jobs (plan picks the environment from the selected working directory).
 
 Do not run `terraform apply` for bootstrap in CI; apply once manually from a trusted workstation or a separate, protected deployment pipeline.

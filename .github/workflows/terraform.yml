@@ -24,6 +24,7 @@ on:
         default: global/bootstrap
         options:
           - global/bootstrap
+          - global/policies
       run_plan:
         description: "Run terraform plan against AWS (requires OIDC)"
         type: boolean
@@ -62,6 +63,7 @@ jobs:
       matrix:
         working_directory:
           - global/bootstrap
+          - global/policies
     defaults:
       run:
         working-directory: ${{ matrix.working_directory }}
@@ -105,7 +107,7 @@ jobs:
     needs: validate
     if: github.event_name == 'workflow_dispatch' && inputs.run_plan
     runs-on: ubuntu-latest
-    environment: bootstrap
+    environment: ${{ github.event.inputs.working_directory == 'global/policies' && 'policies' || 'bootstrap' }}
     defaults:
       run:
         working-directory: ${{ github.event.inputs.working_directory }}
