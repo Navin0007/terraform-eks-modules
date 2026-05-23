@@ -1,0 +1,99 @@
+name: Bootstrap
+
+on:
+  pull_request:
+    paths:
+      - "global/bootstrap/**"
+      - ".github/workflows/bootstrap.yml"
+  push:
+    branches: [main]
+    paths:
+      - "global/bootstrap/**"
+      - ".github/workflows/bootstrap.yml"
+  workflow_dispatch:
+    inputs:
+      run_plan:
+        description: "Run terraform plan against AWS (requires OIDC secrets)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_WORKING_DIR: global/bootstrap
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+          terraform_wrapper: false
+
+      - name: Terraform Format
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.54.0
+
+      - name: TFLint Init
+        run: tflint --init
+
+      - name: TFLint
+        run: tflint
+
+  plan:
+    name: Plan
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.run_plan
+    runs-on: ubuntu-latest
+    environment: bootstrap
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Plan
+        run: |
+          terraform plan -input=false -no-color \
+            -var="project_name=${{ vars.TF_PROJECT_NAME }}" \
+            -var="environment=${{ vars.TF_ENVIRONMENT }}" \
+            -var="region=${{ vars.AWS_REGION }}" \
+            -var="aws_account_id=${{ vars.AWS_ACCOUNT_ID }}"

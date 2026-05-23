@@ -1,0 +1,114 @@
+# Bootstrap
+
+Foundational AWS infrastructure for Terraform remote state. Apply this module **once per AWS account and environment** before any other Terraform configuration in this repository. It uses a **local backend** on first apply; downstream environments consume the outputs to configure S3/DynamoDB remote backends.
+
+## Purpose
+
+- Provision a dedicated S3 bucket for encrypted, versioned Terraform state
+- Provision a DynamoDB table for state locking
+- Provision a customer-managed KMS key and alias for encryption at rest
+
+Without this module, other stacks cannot safely share remote state or coordinate concurrent applies.
+
+## Resources created
+
+| Resource | Description |
+|----------|-------------|
+| `aws_kms_key` | Customer-managed key with rotation enabled (10-day deletion window) |
+| `aws_kms_alias` | `alias/{project_name}-{environment}-terraform-state` |
+| `aws_s3_bucket` | Remote state bucket (`force_destroy = false`) |
+| `aws_s3_bucket_versioning` | Versioning enabled |
+| `aws_s3_bucket_server_side_encryption_configuration` | SSE-KMS using the bootstrap key |
+| `aws_s3_bucket_public_access_block` | All public access settings blocked |
+| `aws_dynamodb_table` | Lock table (`LockID` string hash key, on-demand billing, SSE-KMS) |
+
+Naming (derived from inputs):
+
+- S3 bucket: `{project_name}-{environment}-terraform-state-{aws_account_id}`
+- DynamoDB table: `{project_name}-{environment}-terraform-locks`
+
+## Inputs
+
+| Name | Type | Description |
+|------|------|-------------|
+| `project_name` | `string` | Short project name used in resource naming and tags |
+| `environment` | `string` | Environment label (for example `dev`, `staging`, `prod`) |
+| `region` | `string` | AWS region for all bootstrap resources |
+| `aws_account_id` | `string` | 12-digit AWS account ID (used in bucket name and KMS policy) |
+
+## Outputs
+
+| Name | Description |
+|------|-------------|
+| `state_bucket_name` | S3 bucket name for remote state |
+| `state_bucket_arn` | S3 bucket ARN |
+| `dynamodb_table_name` | DynamoDB lock table name |
+| `kms_key_arn` | KMS key ARN for backend `encrypt` configuration |
+| `kms_key_id` | KMS key ID |
+
+## How to apply
+
+**Prerequisites:** AWS credentials with permissions to create KMS keys, S3 buckets, and DynamoDB tables in the target account and region. Terraform `~> 1.7` and AWS provider `~> 5.0`.
+
+1. Change into this directory:
+
+   ```bash
+   cd global/bootstrap
+   ```
+
+2. Create a variable file (do not commit secrets; adjust values for your account):
+
+   ```hcl
+   # terraform.tfvars
+   project_name   = "my-project"
+   environment    = "prod"
+   region         = "us-east-1"
+   aws_account_id = "123456789012"
+   ```
+
+3. Initialize and apply (local state is stored in this directory until you optionally migrate it):
+
+   ```bash
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+4. Record the outputs. Use them in environment backends, for example:
+
+   ```hcl
+   terraform {
+     backend "s3" {
+       bucket         = "<state_bucket_name output>"
+       key            = "environments/prod/terraform.tfstate"
+       region         = "<region variable>"
+       dynamodb_table = "<dynamodb_table_name output>"
+       encrypt        = true
+       kms_key_id     = "<kms_key_arn output>"
+     }
+   }
+   ```
+
+5. Grant IAM principals that run Terraform `s3:*` on the state bucket, `dynamodb:*` on the lock table (scoped as needed), and `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKey`, and `kms:DescribeKey` on the KMS key.
+
+Re-run `terraform plan` after changes; bootstrap updates are rare and should be reviewed carefully because they affect all dependent environments.
+
+## GitHub Actions
+
+The workflow [`.github/workflows/bootstrap.yml`](../../.github/workflows/bootstrap.yml) runs on pull requests and pushes that touch `global/bootstrap/`.
+
+| Job | When | AWS required |
+|-----|------|----------------|
+| **Validate** | Every PR / push to `main` | No — `terraform fmt`, `init`, `validate`, and TFLint |
+| **Plan** | Manual: Actions → Bootstrap → Run workflow, enable **Run terraform plan** | Yes — OIDC role and repository variables |
+
+### Repository setup for plan (optional)
+
+1. Create an IAM role for GitHub OIDC (trust `token.actions.githubusercontent.com`, subject scoped to this repo).
+2. Attach a policy allowing `kms:*`, `s3:*`, and `dynamodb:*` needed for plan (or broader in a sandbox account).
+3. In GitHub: **Settings → Secrets and variables → Actions**
+   - Secret: `AWS_ROLE_ARN` — role ARN from step 1
+   - Variables: `AWS_REGION`, `AWS_ACCOUNT_ID`, `TF_PROJECT_NAME`, `TF_ENVIRONMENT`
+4. Create a GitHub **environment** named `bootstrap` if you use protection rules for plan jobs.
+
+Do not run `terraform apply` for bootstrap in CI; apply once manually from a trusted workstation or a separate, protected deployment pipeline.
