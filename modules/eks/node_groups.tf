@@ -19,13 +19,18 @@ resource "aws_launch_template" "node_group" {
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_put_response_hop_limit = 2
     instance_metadata_tags      = "enabled"
   }
 
   network_interfaces {
     associate_public_ip_address = false
-    security_groups             = [var.node_sg_id]
+    # EKS does not attach the cluster security group when network_interfaces is set;
+    # both SGs are required for nodes to reach the API server and pass health checks.
+    security_groups = [
+      var.node_sg_id,
+      aws_eks_cluster.main.vpc_config[0].cluster_security_group_id,
+    ]
   }
 
   tag_specifications {
@@ -102,5 +107,8 @@ resource "aws_eks_node_group" "main" {
     ignore_changes = [scaling_config[0].desired_size]
   }
 
-  depends_on = [aws_eks_cluster.main]
+  depends_on = [
+    aws_eks_cluster.main,
+    aws_eks_access_policy_association.node,
+  ]
 }

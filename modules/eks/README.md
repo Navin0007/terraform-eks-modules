@@ -6,7 +6,7 @@ Provisions an Amazon EKS cluster with managed node groups, OIDC provider, launch
 
 ### IMDSv2 enforcement
 
-Every node group launch template sets `http_tokens = "required"` with `http_put_response_hop_limit = 1`. This blocks IMDSv1 and limits metadata hop count so pods cannot reach the instance role credentials through the node metadata service. Without IMDSv2, a compromised workload can exfiltrate node IAM credentials.
+Every node group launch template sets `http_tokens = "required"` with `http_put_response_hop_limit = 2` (required for IRSA and standard EKS bootstrap). Nodes attach both the custom node security group and the EKS-managed cluster security group so they can join when using a custom launch template `network_interfaces` block.
 
 ### Private API endpoint
 

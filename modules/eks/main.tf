@@ -29,6 +29,10 @@ resource "aws_eks_cluster" "main" {
 
   enabled_cluster_log_types = var.cluster_log_types
 
+  access_config {
+    authentication_mode = "API_AND_CONFIG_MAP"
+  }
+
   tags = merge(local.common_tags, {
     Name = local.cluster_name
   })
