@@ -253,18 +253,22 @@ jobs:
 
       - name: Dev plan
         if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'environments/dev')
-        working-directory: environments/dev
         run: |
-          source ../../.github/scripts/terraform-common.sh
+          source .github/scripts/terraform-common.sh
+          ensure_eks_cluster_imported environments/dev
+          pushd environments/dev >/dev/null
           mapfile -t var_args < <(tf_var_args)
           mapfile -t dev_args < <(tf_dev_extra_var_args)
           terraform plan -input=false -no-color "${var_args[@]}" "${dev_args[@]}"
+          popd >/dev/null
 
       - name: Dev apply
         if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'environments/dev')
-        working-directory: environments/dev
         run: |
-          source ../../.github/scripts/terraform-common.sh
+          source .github/scripts/terraform-common.sh
+          ensure_eks_cluster_imported environments/dev
+          pushd environments/dev >/dev/null
           mapfile -t var_args < <(tf_var_args)
           mapfile -t dev_args < <(tf_dev_extra_var_args)
           terraform apply -input=false -auto-approve -no-color "${var_args[@]}" "${dev_args[@]}"
+          popd >/dev/null

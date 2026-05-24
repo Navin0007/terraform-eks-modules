@@ -203,6 +203,59 @@ import_existing_bootstrap_resources() {
   popd >/dev/null
 }
 
+# Import the EKS cluster into state when it already exists in AWS (required before apply).
+ensure_eks_cluster_imported() {
+  local dev_dir="${1:-environments/dev}"
+  local dev_abs did_pushd=false
+  tf_common_vars
+
+  local cluster_name="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-eks"
+  local cluster_addr="module.eks.aws_eks_cluster.main"
+
+  dev_abs="$(cd "${dev_dir}" 2>/dev/null && pwd)" || {
+    echo "::error::Dev directory not found: ${dev_dir}"
+    return 1
+  }
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t dev_args < <(tf_dev_extra_var_args)
+
+  if terraform state show -no-color "${cluster_addr}" &>/dev/null; then
+    echo "EKS cluster already in Terraform state."
+    if [ "${did_pushd}" = true ]; then
+      popd >/dev/null
+    fi
+    return 0
+  fi
+
+  if ! aws eks describe-cluster --name "${cluster_name}" --region "${AWS_REGION}" &>/dev/null; then
+    echo "EKS cluster ${cluster_name} not found in ${AWS_REGION}; nothing to import."
+    if [ "${did_pushd}" = true ]; then
+      popd >/dev/null
+    fi
+    return 0
+  fi
+
+  echo "Importing existing EKS cluster ${cluster_name} into Terraform state..."
+  if terraform import -input=false "${var_args[@]}" "${dev_args[@]}" "${cluster_addr}" "${cluster_name}"; then
+    if [ "${did_pushd}" = true ]; then
+      popd >/dev/null
+    fi
+    return 0
+  fi
+
+  echo "::error::Cluster ${cluster_name} exists in AWS but Terraform import failed. Fix state manually or delete the cluster before re-applying."
+  if [ "${did_pushd}" = true ]; then
+    popd >/dev/null
+  fi
+  return 1
+}
+
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
 import_existing_dev_resources() {
   local dev_dir="${1:-environments/dev}"
@@ -212,10 +265,6 @@ import_existing_dev_resources() {
   local node_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node"
   local log_group_name="/aws/eks/${cluster_name}/cluster"
   local nodegroup_name="general"
-
-  if ! aws eks describe-cluster --name "${cluster_name}" &>/dev/null; then
-    return 0
-  fi
 
   pushd "${dev_dir}" >/dev/null
   mapfile -t var_args < <(tf_var_args)
@@ -247,7 +296,7 @@ import_existing_dev_resources() {
     return 1
   }
 
-  import_if_missing module.eks.aws_eks_cluster.main "${cluster_name}"
+  ensure_eks_cluster_imported "." || return 1
 
   if aws logs describe-log-groups --log-group-name-prefix "${log_group_name}" \
     --query "logGroups[?logGroupName=='${log_group_name}'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
@@ -255,7 +304,7 @@ import_existing_dev_resources() {
   fi
 
   local oidc_issuer oidc_provider_arn
-  oidc_issuer="$(aws eks describe-cluster --name "${cluster_name}" --query 'cluster.identity.oidc.issuer' --output text)"
+  oidc_issuer="$(aws eks describe-cluster --name "${cluster_name}" --region "${AWS_REGION}" --query 'cluster.identity.oidc.issuer' --output text)"
   if [ -n "${oidc_issuer}" ] && [ "${oidc_issuer}" != "None" ]; then
     oidc_provider_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${oidc_issuer#https://}"
     if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${oidc_provider_arn}" &>/dev/null; then
@@ -265,7 +314,8 @@ import_existing_dev_resources() {
 
   if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
-    --principal-arn "${node_role_arn}" &>/dev/null; then
+    --principal-arn "${node_role_arn}" \
+    --region "${AWS_REGION}" &>/dev/null; then
     import_if_missing module.eks.aws_eks_access_entry.node "${cluster_name}:${node_role_arn}" true
     import_if_missing \
       module.eks.aws_eks_access_policy_association.node \
@@ -275,7 +325,8 @@ import_existing_dev_resources() {
 
   if aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" &>/dev/null; then
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" &>/dev/null; then
     import_if_missing \
       "module.eks.aws_eks_node_group.main[\"${nodegroup_name}\"]" \
       "${cluster_name}:${nodegroup_name}" \
