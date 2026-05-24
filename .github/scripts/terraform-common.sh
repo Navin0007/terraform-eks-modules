@@ -81,8 +81,8 @@ maybe_migrate_bootstrap_state() {
     return 0
   fi
 
-  pushd "${bootstrap_dir}" >/dev/null
   export_bootstrap_outputs "${bootstrap_dir}"
+  pushd "${bootstrap_dir}" >/dev/null
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
   mapfile -t backend_args < <(tf_backend_config_args)
   terraform init -input=false -migrate-state -force-copy "${backend_args[@]}"
