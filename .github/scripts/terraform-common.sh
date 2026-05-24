@@ -24,12 +24,35 @@ tf_var_args() {
 }
 
 tf_dev_extra_var_args() {
-  : "${TF_STATE_KMS_KEY_ARN:?Set TF_STATE_KMS_KEY_ARN (bootstrap output kms_key_arn)}"
+  tf_export_dev_vars
   printf '%s\n' \
-    "-var=state_kms_key_arn=${TF_STATE_KMS_KEY_ARN}" \
-    "-var=state_bucket_name=${TF_BACKEND_BUCKET:-}" \
-    "-var=state_kms_key_id=${TF_BACKEND_KMS_KEY_ID:-}" \
-    "-var=dynamodb_table_name=${TF_BACKEND_DYNAMODB_TABLE:-}"
+    "-var=state_kms_key_arn=${TF_VAR_state_kms_key_arn}" \
+    "-var=state_bucket_name=${TF_VAR_state_bucket_name}" \
+    "-var=state_kms_key_id=${TF_VAR_state_kms_key_id}" \
+    "-var=dynamodb_table_name=${TF_VAR_dynamodb_table_name}"
+}
+
+# Export dev root-module variables for terraform import/plan/apply (more reliable than -var alone).
+tf_export_dev_vars() {
+  tf_common_vars
+  : "${TF_STATE_KMS_KEY_ARN:?Set TF_STATE_KMS_KEY_ARN (bootstrap output kms_key_arn)}"
+  : "${TF_BACKEND_BUCKET:?Set TF_BACKEND_BUCKET or TF_STATE_BUCKET (bootstrap state bucket)}"
+
+  export TF_VAR_state_kms_key_arn="${TF_STATE_KMS_KEY_ARN}"
+  export TF_VAR_state_bucket_name="${TF_BACKEND_BUCKET}"
+  export TF_VAR_state_kms_key_id="${TF_BACKEND_KMS_KEY_ID:-}"
+  export TF_VAR_dynamodb_table_name="${TF_BACKEND_DYNAMODB_TABLE:-}"
+}
+
+eks_cluster_name() {
+  tf_common_vars
+  printf '%s\n' "${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-eks"
+}
+
+eks_cluster_exists_in_aws() {
+  local cluster_name="$1"
+  aws eks list-clusters --region "${AWS_REGION}" --output text \
+    | tr '\t' '\n' | grep -Fxq "${cluster_name}"
 }
 
 tf_backend_config_args() {
@@ -207,10 +230,11 @@ import_existing_bootstrap_resources() {
 ensure_eks_cluster_imported() {
   local dev_dir="${1:-environments/dev}"
   local dev_abs did_pushd=false
-  tf_common_vars
+  local cluster_name cluster_addr
 
-  local cluster_name="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-eks"
-  local cluster_addr="module.eks.aws_eks_cluster.main"
+  tf_export_dev_vars
+  cluster_name="$(eks_cluster_name)"
+  cluster_addr="module.eks.aws_eks_cluster.main"
 
   dev_abs="$(cd "${dev_dir}" 2>/dev/null && pwd)" || {
     echo "::error::Dev directory not found: ${dev_dir}"
@@ -222,8 +246,7 @@ ensure_eks_cluster_imported() {
     did_pushd=true
   fi
 
-  mapfile -t var_args < <(tf_var_args)
-  mapfile -t dev_args < <(tf_dev_extra_var_args)
+  echo "Checking EKS cluster ${cluster_name} (region ${AWS_REGION}, account ${AWS_ACCOUNT_ID})..."
 
   if terraform state show -no-color "${cluster_addr}" &>/dev/null; then
     echo "EKS cluster already in Terraform state."
@@ -233,8 +256,8 @@ ensure_eks_cluster_imported() {
     return 0
   fi
 
-  if ! aws eks describe-cluster --name "${cluster_name}" --region "${AWS_REGION}" &>/dev/null; then
-    echo "EKS cluster ${cluster_name} not found in ${AWS_REGION}; nothing to import."
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    echo "EKS cluster ${cluster_name} not found in AWS; it will be created on apply."
     if [ "${did_pushd}" = true ]; then
       popd >/dev/null
     fi
@@ -242,26 +265,64 @@ ensure_eks_cluster_imported() {
   fi
 
   echo "Importing existing EKS cluster ${cluster_name} into Terraform state..."
-  if terraform import -input=false "${var_args[@]}" "${dev_args[@]}" "${cluster_addr}" "${cluster_name}"; then
+  if terraform import -input=false "${cluster_addr}" "${cluster_name}"; then
+    terraform state show -no-color "${cluster_addr}" >/dev/null
+    echo "Successfully imported ${cluster_addr}."
     if [ "${did_pushd}" = true ]; then
       popd >/dev/null
     fi
     return 0
   fi
 
-  echo "::error::Cluster ${cluster_name} exists in AWS but Terraform import failed. Fix state manually or delete the cluster before re-applying."
+  echo "::error::Cluster ${cluster_name} exists in AWS but Terraform import failed (see output above)."
   if [ "${did_pushd}" = true ]; then
     popd >/dev/null
   fi
   return 1
 }
 
+# Abort apply when the cluster exists in AWS but is still missing from state.
+verify_eks_cluster_state() {
+  local dev_dir="${1:-environments/dev}"
+  local cluster_name cluster_addr
+
+  tf_export_dev_vars
+  cluster_name="$(eks_cluster_name)"
+  cluster_addr="module.eks.aws_eks_cluster.main"
+
+  pushd "${dev_dir}" >/dev/null
+
+  if eks_cluster_exists_in_aws "${cluster_name}"; then
+    if terraform state show -no-color "${cluster_addr}" &>/dev/null; then
+      echo "Verified: ${cluster_name} is in AWS and Terraform state."
+    else
+      echo "::error::${cluster_name} exists in AWS but is not in Terraform state. Re-run import or run: terraform import ${cluster_addr} ${cluster_name}"
+      popd >/dev/null
+      return 1
+    fi
+  fi
+
+  popd >/dev/null
+}
+
+# Init remote state, import existing AWS objects, and verify the EKS cluster is in state.
+dev_stack_prepare() {
+  local dev_dir="${1:-environments/dev}"
+
+  tf_export_dev_vars
+  tf_init_s3_backend "${dev_dir}" dev/terraform.tfstate
+  import_existing_dev_resources "${dev_dir}"
+  ensure_eks_cluster_imported "${dev_dir}"
+  verify_eks_cluster_state "${dev_dir}"
+}
+
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
 import_existing_dev_resources() {
   local dev_dir="${1:-environments/dev}"
-  tf_common_vars
+  tf_export_dev_vars
 
-  local cluster_name="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-eks"
+  local cluster_name
+  cluster_name="$(eks_cluster_name)"
   local node_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node"
   local log_group_name="/aws/eks/${cluster_name}/cluster"
   local nodegroup_name="general"
