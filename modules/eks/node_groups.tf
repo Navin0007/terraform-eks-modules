@@ -23,15 +23,11 @@ resource "aws_launch_template" "node_group" {
     instance_metadata_tags      = "enabled"
   }
 
-  network_interfaces {
-    associate_public_ip_address = false
-    # EKS does not attach the cluster security group when network_interfaces is set;
-    # both SGs are required for nodes to reach the API server and pass health checks.
-    security_groups = [
-      var.node_sg_id,
-      aws_eks_cluster.main.vpc_config[0].cluster_security_group_id,
-    ]
-  }
+  # Instance-level SGs (not network_interfaces) so EKS can attach subnets and merge bootstrap user data.
+  vpc_security_group_ids = [
+    var.node_sg_id,
+    aws_eks_cluster.main.vpc_config[0].cluster_security_group_id,
+  ]
 
   tag_specifications {
     resource_type = "instance"
@@ -110,5 +106,11 @@ resource "aws_eks_node_group" "main" {
   depends_on = [
     aws_eks_cluster.main,
     aws_eks_access_entry.node,
+    aws_vpc_security_group_ingress_rule.cluster_sg_from_node_sg_https,
+    aws_vpc_security_group_ingress_rule.cluster_sg_from_node_sg_kubelet,
+    aws_vpc_security_group_egress_rule.cluster_sg_to_node_sg_https,
+    aws_vpc_security_group_egress_rule.cluster_sg_to_node_sg_kubelet,
+    aws_vpc_security_group_ingress_rule.node_sg_from_cluster_sg,
+    aws_vpc_security_group_egress_rule.node_sg_to_cluster_sg_https,
   ]
 }

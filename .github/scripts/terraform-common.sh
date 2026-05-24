@@ -448,10 +448,54 @@ upgrade_eks_authentication_mode_if_needed() {
     bash "${repo_root}/modules/eks/scripts/upgrade-eks-authentication-mode.sh"
 }
 
+# Delete node groups stuck in CREATE_FAILED so the next apply can recreate them.
+delete_failed_eks_node_groups() {
+  tf_export_dev_vars
+  local cluster_name nodegroup_name status
+  cluster_name="$(eks_cluster_name)"
+  nodegroup_name="general"
+
+  if ! aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    return 0
+  fi
+
+  status="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.status' \
+    --output text)"
+
+  case "${status}" in
+    CREATE_FAILED)
+      echo "Deleting failed node group ${nodegroup_name} (status=${status})..."
+      aws eks delete-nodegroup \
+        --cluster-name "${cluster_name}" \
+        --nodegroup-name "${nodegroup_name}" \
+        --region "${AWS_REGION}"
+      aws eks wait nodegroup-deleted \
+        --cluster-name "${cluster_name}" \
+        --nodegroup-name "${nodegroup_name}" \
+        --region "${AWS_REGION}"
+      ;;
+    DELETING)
+      echo "Waiting for node group ${nodegroup_name} deletion..."
+      aws eks wait nodegroup-deleted \
+        --cluster-name "${cluster_name}" \
+        --nodegroup-name "${nodegroup_name}" \
+        --region "${AWS_REGION}"
+      ;;
+  esac
+}
+
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).
 dev_stack_prepare() {
   recover_eks_cluster_before_apply "${1:-environments/dev}"
   upgrade_eks_authentication_mode_if_needed
+  delete_failed_eks_node_groups
 }
 
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
