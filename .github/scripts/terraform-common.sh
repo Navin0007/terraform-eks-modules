@@ -102,7 +102,8 @@ bootstrap_init() {
     mapfile -t backend_args < <(tf_backend_config_args)
     terraform init -input=false "${backend_args[@]}"
   else
-    terraform init -input=false
+    # Bucket does not exist yet; keep state local until maybe_migrate_bootstrap_state runs.
+    terraform init -input=false -backend=false
   fi
 
   popd >/dev/null
