@@ -8,9 +8,7 @@ Root module for the **dev** EKS platform. It wires shared IAM policies, networki
 2. **Terraform** `~> 1.7` (see repository `.terraform-version`).
 3. **`global/bootstrap` applied first** in the same account and environment (`dev`). Bootstrap creates the S3 state bucket, DynamoDB lock table, and KMS key used by this stack and documents the output values you must copy into `backend.tf` and `terraform.tfvars`.
 
-Optional but recommended before the first dev apply:
-
-4. Apply **`global/policies`** once per account/environment if policies are not already created. This root module also calls `global/policies` as a child module; ensure policy naming does not conflict if you maintain policies separately.
+4. Apply **`global/policies`** once per account/environment before dev. Dev reads policy ARNs from `global/policies/terraform.tfstate` via `terraform_remote_state` (it does not create policies itself).
 
 ## Configure remote state (`backend.tf`)
 

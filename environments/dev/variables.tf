@@ -113,9 +113,13 @@ variable "tags" {
 }
 
 variable "state_bucket_name" {
-  description = "S3 bucket name from global/bootstrap output. Documented for operators; backend.tf must be updated manually with this value."
+  description = "S3 bucket name from global/bootstrap output. Used for the remote state backend and to read global/policies outputs."
   type        = string
-  default     = ""
+
+  validation {
+    condition     = var.state_bucket_name != ""
+    error_message = "state_bucket_name is required (bootstrap output state_bucket_name / TF_STATE_BUCKET in CI)."
+  }
 }
 
 variable "state_kms_key_id" {

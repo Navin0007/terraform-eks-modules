@@ -9,20 +9,11 @@ locals {
   irsa_roles = merge(var.irsa_roles, {
     ebs-csi = merge(var.irsa_roles["ebs-csi"], {
       policy_arns = distinct(concat(
-        [module.policies.ebs_csi_policy_arn],
+        [data.terraform_remote_state.policies.outputs.ebs_csi_policy_arn],
         var.irsa_roles["ebs-csi"].policy_arns
       ))
     })
   })
-}
-
-module "policies" {
-  source = "../../global/policies"
-
-  project_name   = var.project_name
-  environment    = var.environment
-  aws_account_id = var.aws_account_id
-  region         = var.region
 }
 
 module "vpc" {
@@ -49,19 +40,17 @@ module "iam" {
   aws_account_id = var.aws_account_id
   region         = var.region
 
-  eks_cluster_policy_arn       = module.policies.eks_cluster_policy_arn
-  eks_node_policy_arn          = module.policies.eks_node_policy_arn
-  eks_autoscaler_policy_arn    = module.policies.eks_autoscaler_policy_arn
-  eks_load_balancer_policy_arn = module.policies.eks_load_balancer_policy_arn
-  ebs_csi_policy_arn           = module.policies.ebs_csi_policy_arn
+  eks_cluster_policy_arn       = data.terraform_remote_state.policies.outputs.eks_cluster_policy_arn
+  eks_node_policy_arn          = data.terraform_remote_state.policies.outputs.eks_node_policy_arn
+  eks_autoscaler_policy_arn    = data.terraform_remote_state.policies.outputs.eks_autoscaler_policy_arn
+  eks_load_balancer_policy_arn = data.terraform_remote_state.policies.outputs.eks_load_balancer_policy_arn
+  ebs_csi_policy_arn           = data.terraform_remote_state.policies.outputs.ebs_csi_policy_arn
 
   oidc_provider_arn       = ""
   cluster_oidc_issuer_url = ""
   irsa_roles              = {}
 
   tags = local.common_tags
-
-  depends_on = [module.policies]
 }
 
 module "sg" {
@@ -121,11 +110,11 @@ module "iam_irsa" {
   aws_account_id = var.aws_account_id
   region         = var.region
 
-  eks_cluster_policy_arn       = module.policies.eks_cluster_policy_arn
-  eks_node_policy_arn          = module.policies.eks_node_policy_arn
-  eks_autoscaler_policy_arn    = module.policies.eks_autoscaler_policy_arn
-  eks_load_balancer_policy_arn = module.policies.eks_load_balancer_policy_arn
-  ebs_csi_policy_arn           = module.policies.ebs_csi_policy_arn
+  eks_cluster_policy_arn       = data.terraform_remote_state.policies.outputs.eks_cluster_policy_arn
+  eks_node_policy_arn          = data.terraform_remote_state.policies.outputs.eks_node_policy_arn
+  eks_autoscaler_policy_arn    = data.terraform_remote_state.policies.outputs.eks_autoscaler_policy_arn
+  eks_load_balancer_policy_arn = data.terraform_remote_state.policies.outputs.eks_load_balancer_policy_arn
+  ebs_csi_policy_arn           = data.terraform_remote_state.policies.outputs.ebs_csi_policy_arn
 
   create_core_roles       = false
   oidc_provider_arn       = module.eks.oidc_provider_arn

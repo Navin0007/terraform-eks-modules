@@ -123,6 +123,7 @@ jobs:
     needs: validate
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     environment: ${{ vars.TF_ENVIRONMENT || 'dev' }}
     concurrency:
       group: terraform-${{ github.event.inputs.target }}-${{ vars.TF_ENVIRONMENT }}
