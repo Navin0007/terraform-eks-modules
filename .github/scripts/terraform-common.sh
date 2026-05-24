@@ -51,8 +51,41 @@ eks_cluster_name() {
 
 eks_cluster_exists_in_aws() {
   local cluster_name="$1"
-  aws eks list-clusters --region "${AWS_REGION}" --output text \
-    | tr '\t' '\n' | grep -Fxq "${cluster_name}"
+  aws eks describe-cluster --name "${cluster_name}" --region "${AWS_REGION}" &>/dev/null
+}
+
+# Print context when debugging import/state issues in CI.
+dev_import_diagnostics() {
+  local dev_dir="${1:-environments/dev}"
+  local cluster_name
+
+  tf_export_dev_vars
+  cluster_name="$(eks_cluster_name)"
+
+  echo "=== Dev import diagnostics ==="
+  echo "AWS_REGION=${AWS_REGION}"
+  echo "AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}"
+  echo "TF_PROJECT_NAME=${TF_PROJECT_NAME}"
+  echo "TF_ENVIRONMENT=${TF_ENVIRONMENT}"
+  echo "TF_BACKEND_BUCKET=${TF_BACKEND_BUCKET}"
+  echo "Expected cluster: ${cluster_name}"
+  echo "State key: dev/terraform.tfstate"
+  aws sts get-caller-identity
+  if eks_cluster_exists_in_aws "${cluster_name}"; then
+    echo "AWS: cluster EXISTS (describe-cluster OK)"
+  else
+    echo "AWS: cluster NOT FOUND (describe-cluster failed)"
+  fi
+
+  pushd "${dev_dir}" >/dev/null
+  if terraform state show -no-color module.eks.aws_eks_cluster.main &>/dev/null; then
+    echo "Terraform state: module.eks.aws_eks_cluster.main is present"
+  else
+    echo "Terraform state: module.eks.aws_eks_cluster.main is MISSING"
+  fi
+  echo "EKS-related state addresses:"
+  terraform state list -no-color 2>/dev/null | grep -E 'module\.eks|eks_cluster' || echo "(none)"
+  popd >/dev/null
 }
 
 tf_backend_config_args() {
@@ -309,6 +342,7 @@ verify_eks_cluster_state() {
 import_eks_cluster_recovery() {
   local dev_dir="${1:-environments/dev}"
   local cluster_name cluster_addr
+  local import_status=0
 
   tf_export_dev_vars
   tf_init_s3_backend "${dev_dir}" dev/terraform.tfstate
@@ -323,26 +357,38 @@ import_eks_cluster_recovery() {
     return 0
   fi
 
-  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
-    echo "EKS cluster ${cluster_name} not found in AWS; skipping import."
+  echo "==> terraform import -target=${cluster_addr} ${cluster_addr} ${cluster_name}"
+  set +e
+  terraform import -input=false -target="${cluster_addr}" "${cluster_addr}" "${cluster_name}"
+  import_status=$?
+  set -e
+
+  if [ "${import_status}" -eq 0 ]; then
+    terraform state show -no-color "${cluster_addr}"
+    echo "Import complete."
     popd >/dev/null
     return 0
   fi
 
-  echo "==> terraform import ${cluster_addr} ${cluster_name}"
-  terraform import -input=false "${cluster_addr}" "${cluster_name}"
-  terraform state show -no-color "${cluster_addr}"
-  echo "Import complete."
+  echo "::warning::terraform import exited with status ${import_status}"
 
+  if eks_cluster_exists_in_aws "${cluster_name}"; then
+    echo "::error::Cluster ${cluster_name} exists in AWS but import failed. See diagnostics above."
+    dev_import_diagnostics "${dev_dir}"
+    popd >/dev/null
+    return 1
+  fi
+
+  echo "Cluster not found in AWS; it will be created on apply."
   popd >/dev/null
+  return 0
 }
 
-# Final check before plan/apply (import runs in earlier workflow steps).
+# Final check before plan/apply (import runs in the same or an earlier workflow step).
 dev_stack_prepare() {
   local dev_dir="${1:-environments/dev}"
 
   tf_export_dev_vars
-  tf_init_s3_backend "${dev_dir}" dev/terraform.tfstate
   verify_eks_cluster_state "${dev_dir}"
 }
 

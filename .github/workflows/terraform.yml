@@ -271,6 +271,9 @@ jobs:
         if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
+          # Re-run import in the same step as apply so state is guaranteed before create.
+          import_eks_cluster_recovery environments/dev
+          dev_import_diagnostics environments/dev
           dev_stack_prepare environments/dev
           pushd environments/dev >/dev/null
           terraform apply -input=false -auto-approve -no-color
