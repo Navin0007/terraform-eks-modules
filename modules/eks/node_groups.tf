@@ -109,6 +109,6 @@ resource "aws_eks_node_group" "main" {
 
   depends_on = [
     aws_eks_cluster.main,
-    aws_eks_access_policy_association.node,
+    aws_eks_access_entry.node,
   ]
 }

@@ -514,10 +514,6 @@ import_existing_dev_resources() {
     --principal-arn "${node_role_arn}" \
     --region "${AWS_REGION}" &>/dev/null; then
     import_if_missing module.eks.aws_eks_access_entry.node "${cluster_name}:${node_role_arn}" true
-    import_if_missing \
-      module.eks.aws_eks_access_policy_association.node \
-      "${cluster_name}#${node_role_arn}#arn:aws:eks::aws:cluster-access-policy/AmazonEKSNodegroupPolicy" \
-      true
   fi
 
   if aws eks describe-nodegroup \
