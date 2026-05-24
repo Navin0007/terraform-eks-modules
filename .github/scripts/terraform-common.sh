@@ -228,30 +228,49 @@ import_existing_dev_resources() {
   import_if_missing() {
     local addr="$1"
     local id="$2"
+    local optional="${3:-false}"
 
     if terraform_state_has "${addr}"; then
       return 0
     fi
 
     echo "Importing existing dev resource ${addr}..."
-    terraform import -input=false "${var_args[@]}" "${dev_args[@]}" "${addr}" "${id}"
+    if terraform import -input=false "${var_args[@]}" "${dev_args[@]}" "${addr}" "${id}"; then
+      return 0
+    fi
+
+    if [ "${optional}" = "true" ]; then
+      echo "::warning::Could not import ${addr}; Terraform will create or update it on apply."
+      return 0
+    fi
+
+    return 1
   }
 
   import_if_missing module.eks.aws_eks_cluster.main "${cluster_name}"
-  import_if_missing module.eks.aws_cloudwatch_log_group.cluster "${log_group_name}"
+
+  if aws logs describe-log-groups --log-group-name-prefix "${log_group_name}" \
+    --query "logGroups[?logGroupName=='${log_group_name}'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
+    import_if_missing module.eks.aws_cloudwatch_log_group.cluster "${log_group_name}" true
+  fi
 
   local oidc_issuer oidc_provider_arn
   oidc_issuer="$(aws eks describe-cluster --name "${cluster_name}" --query 'cluster.identity.oidc.issuer' --output text)"
-  oidc_provider_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${oidc_issuer#https://}"
-  import_if_missing module.eks.aws_iam_openid_connect_provider.cluster "${oidc_provider_arn}"
+  if [ -n "${oidc_issuer}" ] && [ "${oidc_issuer}" != "None" ]; then
+    oidc_provider_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${oidc_issuer#https://}"
+    if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${oidc_provider_arn}" &>/dev/null; then
+      import_if_missing module.eks.aws_iam_openid_connect_provider.cluster "${oidc_provider_arn}" true
+    fi
+  fi
 
   if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" &>/dev/null; then
-    import_if_missing module.eks.aws_eks_access_entry.node "${cluster_name}:${node_role_arn}"
+    import_if_missing module.eks.aws_eks_access_entry.node "${cluster_name}:${node_role_arn}" true
     import_if_missing \
       module.eks.aws_eks_access_policy_association.node \
-      "${cluster_name}#${node_role_arn}#arn:aws:eks::aws:cluster-access-policy/AmazonEKSNodegroupPolicy"
+      "${cluster_name}#${node_role_arn}#arn:aws:eks::aws:cluster-access-policy/AmazonEKSNodegroupPolicy" \
+      true
   fi
 
   if aws eks describe-nodegroup \
@@ -259,7 +278,8 @@ import_existing_dev_resources() {
     --nodegroup-name "${nodegroup_name}" &>/dev/null; then
     import_if_missing \
       "module.eks.aws_eks_node_group.main[\"${nodegroup_name}\"]" \
-      "${cluster_name}:${nodegroup_name}"
+      "${cluster_name}:${nodegroup_name}" \
+      true
 
     local launch_template_id
     launch_template_id="$(aws eks describe-nodegroup \
@@ -270,7 +290,8 @@ import_existing_dev_resources() {
     if [ -n "${launch_template_id}" ] && [ "${launch_template_id}" != "None" ]; then
       import_if_missing \
         "module.eks.aws_launch_template.node_group[\"${nodegroup_name}\"]" \
-        "${launch_template_id}"
+        "${launch_template_id}" \
+        true
     fi
   fi
 
