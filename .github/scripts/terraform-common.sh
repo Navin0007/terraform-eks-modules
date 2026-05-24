@@ -47,18 +47,55 @@ tf_backend_config_args() {
     "-backend-config=encrypt=true"
 }
 
+bootstrap_state_bucket_name() {
+  tf_common_vars
+  printf '%s\n' "${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state-${AWS_ACCOUNT_ID}"
+}
+
+bootstrap_state_bucket_exists() {
+  local bucket
+  bucket="$(bootstrap_state_bucket_name)"
+  aws s3api head-bucket --bucket "${bucket}" &>/dev/null
+}
+
+# True when bootstrap has not been migrated to S3 yet (first apply in this run).
+bootstrap_uses_local_state() {
+  [ -z "${TF_STATE_BUCKET:-}" ] && ! bootstrap_state_bucket_exists
+}
+
+# Emit -state=terraform.tfstate for plan/import/apply/output before S3 migration.
+bootstrap_local_state_args() {
+  if bootstrap_uses_local_state; then
+    printf '%s\n' "-state=terraform.tfstate"
+  fi
+}
+
+bootstrap_set_backend_from_aws() {
+  tf_common_vars
+  export TF_BACKEND_BUCKET
+  TF_BACKEND_BUCKET="$(bootstrap_state_bucket_name)"
+  export TF_BACKEND_DYNAMODB_TABLE="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-locks"
+  export TF_BACKEND_REGION="${AWS_REGION}"
+  export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
+
+  local kms_alias="alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
+  export TF_BACKEND_KMS_KEY_ID
+  TF_BACKEND_KMS_KEY_ID="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
+}
+
 export_bootstrap_outputs() {
   local bootstrap_dir="${1:-global/bootstrap}"
   pushd "${bootstrap_dir}" >/dev/null
+  mapfile -t state_args < <(bootstrap_local_state_args)
 
   export TF_BACKEND_BUCKET
-  TF_BACKEND_BUCKET="$(terraform output -raw state_bucket_name)"
+  TF_BACKEND_BUCKET="$(terraform output -raw "${state_args[@]}" state_bucket_name)"
   export TF_BACKEND_KMS_KEY_ID
-  TF_BACKEND_KMS_KEY_ID="$(terraform output -raw kms_key_id)"
+  TF_BACKEND_KMS_KEY_ID="$(terraform output -raw "${state_args[@]}" kms_key_id)"
   export TF_BACKEND_DYNAMODB_TABLE
-  TF_BACKEND_DYNAMODB_TABLE="$(terraform output -raw dynamodb_table_name)"
+  TF_BACKEND_DYNAMODB_TABLE="$(terraform output -raw "${state_args[@]}" dynamodb_table_name)"
   export TF_STATE_KMS_KEY_ARN
-  TF_STATE_KMS_KEY_ARN="$(terraform output -raw kms_key_arn)"
+  TF_STATE_KMS_KEY_ARN="$(terraform output -raw "${state_args[@]}" kms_key_arn)"
   export TF_BACKEND_REGION="${AWS_REGION}"
 
   popd >/dev/null
@@ -101,6 +138,11 @@ bootstrap_init() {
     export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
     mapfile -t backend_args < <(tf_backend_config_args)
     terraform init -input=false "${backend_args[@]}"
+  elif bootstrap_state_bucket_exists; then
+    # Bootstrap was applied previously; use remote state even without TF_STATE_* vars.
+    bootstrap_set_backend_from_aws
+    mapfile -t backend_args < <(tf_backend_config_args)
+    terraform init -input=false "${backend_args[@]}"
   else
     # Bucket does not exist yet; keep state local until maybe_migrate_bootstrap_state runs.
     terraform init -input=false -backend=false
@@ -122,9 +164,10 @@ import_existing_bootstrap_resources() {
 
   pushd "${bootstrap_dir}" >/dev/null
   mapfile -t var_args < <(tf_var_args)
+  mapfile -t state_args < <(bootstrap_local_state_args)
 
   terraform_state_has() {
-    terraform state show -no-color "$1" &>/dev/null
+    terraform state show -no-color "${state_args[@]}" "$1" &>/dev/null
   }
 
   import_if_missing() {
@@ -136,7 +179,7 @@ import_existing_bootstrap_resources() {
     fi
 
     echo "Importing existing bootstrap resource ${addr}..."
-    terraform import -input=false "${var_args[@]}" "${addr}" "${id}"
+    terraform import -input=false "${state_args[@]}" "${var_args[@]}" "${addr}" "${id}"
   }
 
   if aws kms describe-key --key-id "${kms_alias}" &>/dev/null; then

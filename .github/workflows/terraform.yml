@@ -164,7 +164,8 @@ jobs:
         run: |
           source ../../.github/scripts/terraform-common.sh
           mapfile -t var_args < <(tf_var_args)
-          terraform plan -input=false -no-color "${var_args[@]}"
+          mapfile -t state_args < <(bootstrap_local_state_args)
+          terraform plan -input=false -no-color "${state_args[@]}" "${var_args[@]}"
 
       - name: Bootstrap apply
         if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
@@ -172,7 +173,8 @@ jobs:
         run: |
           source ../../.github/scripts/terraform-common.sh
           mapfile -t var_args < <(tf_var_args)
-          terraform apply -input=false -auto-approve -no-color "${var_args[@]}"
+          mapfile -t state_args < <(bootstrap_local_state_args)
+          terraform apply -input=false -auto-approve -no-color "${state_args[@]}" "${var_args[@]}"
 
       - name: Migrate bootstrap state to S3
         if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
