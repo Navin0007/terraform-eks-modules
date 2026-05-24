@@ -45,6 +45,42 @@ resource "aws_kms_key" "terraform_state" {
             "kms:CallerAccount" = var.aws_account_id
           }
         }
+      },
+      {
+        Sid    = "AllowEKSUseOfKey"
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ListGrants",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowEC2EBSUseOfKey"
+        Effect = "Allow"
+        Principal = {
+          AWS = "*"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:CreateGrant",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = var.aws_account_id
+            "kms:ViaService"    = "ec2.${var.region}.amazonaws.com"
+          }
+        }
       }
     ]
   })

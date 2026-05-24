@@ -14,7 +14,7 @@ Without this module, other stacks cannot safely share remote state or coordinate
 
 | Resource | Description |
 |----------|-------------|
-| `aws_kms_key` | Customer-managed key with rotation enabled (10-day deletion window) |
+| `aws_kms_key` | Customer-managed key with rotation enabled (10-day deletion window); used for remote state, EKS secrets encryption, and encrypted node EBS volumes |
 | `aws_kms_alias` | `alias/{project_name}-{environment}-terraform-state` |
 | `aws_s3_bucket` | Remote state bucket (`force_destroy = false`) |
 | `aws_s3_bucket_versioning` | Versioning enabled |
@@ -43,7 +43,7 @@ Naming (derived from inputs):
 | `state_bucket_name` | S3 bucket name for remote state |
 | `state_bucket_arn` | S3 bucket ARN |
 | `dynamodb_table_name` | DynamoDB lock table name |
-| `kms_key_arn` | KMS key ARN for backend `encrypt` configuration |
+| `kms_key_arn` | KMS key ARN for backend `encrypt`, EKS control plane secrets, and node root volumes |
 | `kms_key_id` | KMS key ID |
 
 ## How to apply
