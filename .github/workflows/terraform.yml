@@ -245,6 +245,12 @@ jobs:
           source .github/scripts/terraform-common.sh
           tf_init_s3_backend environments/dev dev/terraform.tfstate
 
+      - name: Import existing dev resources
+        if: inputs.target == 'all' || inputs.target == 'environments/dev'
+        run: |
+          source .github/scripts/terraform-common.sh
+          import_existing_dev_resources environments/dev
+
       - name: Dev plan
         if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         working-directory: environments/dev
