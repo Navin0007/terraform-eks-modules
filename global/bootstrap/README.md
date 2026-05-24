@@ -93,6 +93,30 @@ Naming (derived from inputs):
 
 Re-run `terraform plan` after changes; bootstrap updates are rare and should be reviewed carefully because they affect all dependent environments.
 
+### Recovering from partial bootstrap applies
+
+If bootstrap apply fails partway through (or state is lost before S3 migration), AWS resources may already exist while Terraform state does not. Re-running apply then fails with errors such as `ResourceInUseException: Table already exists`.
+
+GitHub Actions runs `import_existing_bootstrap_resources` after init to import any existing KMS, S3, and DynamoDB resources into state before plan/apply.
+
+To recover locally:
+
+```bash
+cd global/bootstrap
+source ../../.github/scripts/terraform-common.sh
+export TF_PROJECT_NAME=my-project TF_ENVIRONMENT=dev AWS_REGION=us-east-1 AWS_ACCOUNT_ID=123456789012
+bootstrap_init global/bootstrap
+import_existing_bootstrap_resources global/bootstrap
+terraform plan
+```
+
+Or import a single resource manually:
+
+```bash
+terraform import -var=project_name=... -var=environment=... -var=region=... -var=aws_account_id=... \
+  aws_dynamodb_table.terraform_state_lock my-project-dev-terraform-locks
+```
+
 ## GitHub Actions
 
 The workflow [`.github/workflows/terraform.yml`](../../.github/workflows/terraform.yml) runs on pull requests and pushes that change Terraform files.

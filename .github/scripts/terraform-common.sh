@@ -107,3 +107,54 @@ bootstrap_init() {
 
   popd >/dev/null
 }
+
+# Import bootstrap resources that already exist in AWS but are missing from state
+# (for example after a partial apply or lost local state before S3 migration).
+import_existing_bootstrap_resources() {
+  local bootstrap_dir="${1:-global/bootstrap}"
+  tf_common_vars
+
+  local name_prefix="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}"
+  local state_bucket="${name_prefix}-terraform-state-${AWS_ACCOUNT_ID}"
+  local dynamodb_table="${name_prefix}-terraform-locks"
+  local kms_alias="alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
+
+  pushd "${bootstrap_dir}" >/dev/null
+  mapfile -t var_args < <(tf_var_args)
+
+  terraform_state_has() {
+    terraform state show -no-color "$1" &>/dev/null
+  }
+
+  import_if_missing() {
+    local addr="$1"
+    local id="$2"
+
+    if terraform_state_has "${addr}"; then
+      return 0
+    fi
+
+    echo "Importing existing bootstrap resource ${addr}..."
+    terraform import -input=false "${var_args[@]}" "${addr}" "${id}"
+  }
+
+  if aws kms describe-key --key-id "${kms_alias}" &>/dev/null; then
+    local key_id
+    key_id="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
+    import_if_missing aws_kms_key.terraform_state "${key_id}"
+    import_if_missing aws_kms_alias.terraform_state "${kms_alias}"
+  fi
+
+  if aws s3api head-bucket --bucket "${state_bucket}" &>/dev/null; then
+    import_if_missing aws_s3_bucket.terraform_state "${state_bucket}"
+    import_if_missing aws_s3_bucket_versioning.terraform_state "${state_bucket}"
+    import_if_missing aws_s3_bucket_server_side_encryption_configuration.terraform_state "${state_bucket}"
+    import_if_missing aws_s3_bucket_public_access_block.terraform_state "${state_bucket}"
+  fi
+
+  if aws dynamodb describe-table --table-name "${dynamodb_table}" &>/dev/null; then
+    import_if_missing aws_dynamodb_table.terraform_state_lock "${dynamodb_table}"
+  fi
+
+  popd >/dev/null
+}

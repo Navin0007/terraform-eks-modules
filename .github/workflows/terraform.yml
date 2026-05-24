@@ -152,6 +152,12 @@ jobs:
           source .github/scripts/terraform-common.sh
           bootstrap_init global/bootstrap
 
+      - name: Import existing bootstrap resources
+        if: inputs.target == 'all' || inputs.target == 'global/bootstrap'
+        run: |
+          source .github/scripts/terraform-common.sh
+          import_existing_bootstrap_resources global/bootstrap
+
       - name: Bootstrap plan
         if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
         working-directory: global/bootstrap
