@@ -47,12 +47,9 @@ resource "aws_iam_role" "irsa" {
   name               = "${var.project_name}-${var.environment}-${each.key}-irsa"
   assume_role_policy = data.aws_iam_policy_document.irsa_trust[each.key].json
 
-  tags = {
-    project     = var.project_name
-    environment = var.environment
-    managed_by  = "terraform"
-    irsa_role   = each.key
-  }
+  tags = merge(local.common_tags, {
+    irsa_role = each.key
+  })
 }
 
 resource "aws_iam_role_policy_attachment" "irsa" {

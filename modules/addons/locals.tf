@@ -1,8 +1,8 @@
 locals {
   common_tags = merge(
     {
-      Project      = var.project_name
-      Environment  = var.environment
+      project      = var.project_name
+      environment  = var.environment
       cluster_name = var.cluster_name
       managed_by   = "terraform"
     },
