@@ -1,0 +1,153 @@
+locals {
+  cluster_name = "${var.project_name}-${var.environment}-eks"
+
+  common_tags = merge(var.tags, {
+    project     = var.project_name
+    environment = var.environment
+  })
+
+  irsa_roles = merge(var.irsa_roles, {
+    ebs-csi = merge(var.irsa_roles["ebs-csi"], {
+      policy_arns = distinct(concat(
+        [module.policies.ebs_csi_policy_arn],
+        var.irsa_roles["ebs-csi"].policy_arns
+      ))
+    })
+  })
+}
+
+module "policies" {
+  source = "../../global/policies"
+
+  project_name   = var.project_name
+  environment    = var.environment
+  aws_account_id = var.aws_account_id
+  region         = var.region
+}
+
+module "vpc" {
+  source = "../../modules/vpc"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  region               = var.region
+  vpc_cidr             = var.vpc_cidr
+  azs                  = var.azs
+  private_subnet_cidrs = var.private_subnet_cidrs
+  public_subnet_cidrs  = var.public_subnet_cidrs
+  cluster_name         = local.cluster_name
+  single_nat_gateway   = true
+  tags                 = local.common_tags
+}
+
+module "iam" {
+  source = "../../modules/iam"
+
+  project_name   = var.project_name
+  environment    = var.environment
+  cluster_name   = local.cluster_name
+  aws_account_id = var.aws_account_id
+  region         = var.region
+
+  eks_cluster_policy_arn       = module.policies.eks_cluster_policy_arn
+  eks_node_policy_arn          = module.policies.eks_node_policy_arn
+  eks_autoscaler_policy_arn    = module.policies.eks_autoscaler_policy_arn
+  eks_load_balancer_policy_arn = module.policies.eks_load_balancer_policy_arn
+  ebs_csi_policy_arn           = module.policies.ebs_csi_policy_arn
+
+  oidc_provider_arn       = ""
+  cluster_oidc_issuer_url = ""
+  irsa_roles              = {}
+
+  tags = local.common_tags
+
+  depends_on = [module.policies]
+}
+
+module "sg" {
+  source = "../../modules/sg"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  cluster_name         = local.cluster_name
+  vpc_id               = module.vpc.vpc_id
+  vpc_cidr             = module.vpc.vpc_cidr_block
+  private_subnet_cidrs = var.private_subnet_cidrs
+  public_subnet_cidrs  = var.public_subnet_cidrs
+  tags                 = local.common_tags
+
+  depends_on = [module.vpc]
+}
+
+module "eks" {
+  source = "../../modules/eks"
+
+  project_name    = var.project_name
+  environment     = var.environment
+  cluster_name    = local.cluster_name
+  cluster_version = var.cluster_version
+  region          = var.region
+
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+
+  cluster_role_arn = module.iam.cluster_role_arn
+  node_role_arn    = module.iam.node_role_arn
+
+  control_plane_sg_id = module.sg.control_plane_sg_id
+  node_sg_id          = module.sg.node_sg_id
+
+  kms_key_arn = var.state_kms_key_arn
+
+  node_groups = var.node_groups
+
+  endpoint_private_access = true
+  endpoint_public_access  = false
+
+  tags = local.common_tags
+
+  depends_on = [
+    module.iam,
+    module.sg,
+  ]
+}
+
+module "iam_irsa" {
+  source = "../../modules/iam"
+
+  project_name   = var.project_name
+  environment    = var.environment
+  cluster_name   = local.cluster_name
+  aws_account_id = var.aws_account_id
+  region         = var.region
+
+  eks_cluster_policy_arn       = module.policies.eks_cluster_policy_arn
+  eks_node_policy_arn          = module.policies.eks_node_policy_arn
+  eks_autoscaler_policy_arn    = module.policies.eks_autoscaler_policy_arn
+  eks_load_balancer_policy_arn = module.policies.eks_load_balancer_policy_arn
+  ebs_csi_policy_arn           = module.policies.ebs_csi_policy_arn
+
+  create_core_roles       = false
+  oidc_provider_arn       = module.eks.oidc_provider_arn
+  cluster_oidc_issuer_url = module.eks.cluster_oidc_issuer_url
+  irsa_roles              = local.irsa_roles
+
+  tags = local.common_tags
+
+  depends_on = [module.eks]
+}
+
+module "addons" {
+  source = "../../modules/addons"
+
+  project_name     = var.project_name
+  environment      = var.environment
+  cluster_name     = module.eks.cluster_name
+  cluster_id       = module.eks.cluster_id
+  cluster_version  = module.eks.cluster_version
+  vpc_cni_role_arn = module.iam_irsa.irsa_role_arns["vpc-cni"]
+  ebs_csi_role_arn = module.iam_irsa.irsa_role_arns["ebs-csi"]
+  tags             = local.common_tags
+
+  depends_on = [module.iam_irsa]
+}

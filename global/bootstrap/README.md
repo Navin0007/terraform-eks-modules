@@ -99,18 +99,27 @@ The workflow [`.github/workflows/terraform.yml`](../../.github/workflows/terrafo
 
 | Job | When | AWS required |
 |-----|------|----------------|
-| **Format** | Every PR / push to `main` | No — `terraform fmt -check -recursive` |
-| **Validate** | Every PR / push to `main` | No — `terraform init` and `validate` for `global/bootstrap` and `global/policies` |
+| **Format** | Every PR / push to `main` | No |
+| **Validate** | Every PR / push to `main` | No — `global/bootstrap`, `global/policies`, `environments/dev` |
 | **TFLint** | Every PR / push to `main` | No |
-| **Plan** | Manual: Actions → Terraform → Run workflow, enable **Run terraform plan** | Yes — OIDC role and repository variables |
+| **Plan / Apply** | Manual: Actions → Terraform → Run workflow | Yes — OIDC |
 
-### Repository setup for plan (optional)
+### Deploy order in CI (`target: all`)
 
-1. Create an IAM role for GitHub OIDC (trust `token.actions.githubusercontent.com`, subject scoped to this repo).
-2. Attach a policy allowing `kms:*`, `s3:*`, and `dynamodb:*` needed for plan (or broader in a sandbox account).
-3. In GitHub: **Settings → Secrets and variables → Actions**
-   - Secret: `AWS_ROLE_ARN` — role ARN from step 1
-   - Variables: `AWS_REGION`, `AWS_ACCOUNT_ID`, `TF_PROJECT_NAME`, `TF_ENVIRONMENT`
-4. Create GitHub **environments** named `bootstrap` and `policies` if you use protection rules for plan jobs (plan picks the environment from the selected working directory).
+1. **Bootstrap** — local backend on first apply, then state migrates to `s3://…/global/bootstrap/terraform.tfstate`
+2. **Policies** — `global/policies/terraform.tfstate`
+3. **Dev** — `dev/terraform.tfstate`
 
-Do not run `terraform apply` for bootstrap in CI; apply once manually from a trusted workstation or a separate, protected deployment pipeline.
+Use **operation** `apply` for the full stack or `plan` to preview. Narrow **target** to a single root when needed.
+
+### Repository setup
+
+1. IAM role for GitHub OIDC (trust `token.actions.githubusercontent.com`, subject scoped to this repo).
+2. Policy: permissions for bootstrap (KMS, S3, DynamoDB), policies (IAM), and dev (VPC, EKS, IAM, etc.).
+3. **Settings → Secrets and variables → Actions**
+   - Secret: `AWS_ROLE_ARN`
+   - Variables (required): `AWS_REGION`, `AWS_ACCOUNT_ID`, `TF_PROJECT_NAME`, `TF_ENVIRONMENT` (for example `dev`)
+   - Variables (after first bootstrap apply, for plan-only runs): `TF_STATE_BUCKET`, `TF_STATE_KMS_KEY_ID`, `TF_STATE_DYNAMODB_TABLE`, `TF_STATE_KMS_KEY_ARN`
+4. Optional GitHub **environment** named `dev` (workflow uses `TF_ENVIRONMENT`) for approval gates on apply.
+
+On the first **apply** with `target: all`, the workflow prints bootstrap output values; copy them into the `TF_STATE_*` repository variables so later plan runs can init policies and dev without re-applying bootstrap.

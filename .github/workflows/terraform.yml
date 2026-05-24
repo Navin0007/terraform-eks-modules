@@ -8,6 +8,7 @@ on:
       - ".terraform-version"
       - ".tflint.hcl"
       - ".github/workflows/terraform.yml"
+      - ".github/scripts/**"
   push:
     branches: [main]
     paths:
@@ -16,19 +17,25 @@ on:
       - ".terraform-version"
       - ".tflint.hcl"
       - ".github/workflows/terraform.yml"
+      - ".github/scripts/**"
   workflow_dispatch:
     inputs:
-      working_directory:
-        description: "Terraform root module to plan"
+      operation:
+        description: "Terraform operation against AWS (requires OIDC)"
         type: choice
-        default: global/bootstrap
+        default: plan
         options:
+          - plan
+          - apply
+      target:
+        description: "Stack to run (all runs bootstrap → policies → dev in order)"
+        type: choice
+        default: all
+        options:
+          - all
           - global/bootstrap
           - global/policies
-      run_plan:
-        description: "Run terraform plan against AWS (requires OIDC)"
-        type: boolean
-        default: false
+          - environments/dev
 
 permissions:
   contents: read
@@ -36,6 +43,14 @@ permissions:
 
 env:
   TF_IN_AUTOMATION: "true"
+  TF_PROJECT_NAME: ${{ vars.TF_PROJECT_NAME }}
+  TF_ENVIRONMENT: ${{ vars.TF_ENVIRONMENT }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_STATE_KMS_KEY_ID: ${{ vars.TF_STATE_KMS_KEY_ID }}
+  TF_STATE_DYNAMODB_TABLE: ${{ vars.TF_STATE_DYNAMODB_TABLE }}
+  TF_STATE_KMS_KEY_ARN: ${{ vars.TF_STATE_KMS_KEY_ARN }}
 
 jobs:
   fmt:
@@ -64,6 +79,7 @@ jobs:
         working_directory:
           - global/bootstrap
           - global/policies
+          - environments/dev
     defaults:
       run:
         working-directory: ${{ matrix.working_directory }}
@@ -102,15 +118,15 @@ jobs:
       - name: TFLint
         run: tflint -f compact
 
-  plan:
-    name: Plan (${{ github.event.inputs.working_directory }})
+  aws:
+    name: ${{ github.event.inputs.operation == 'apply' && 'Apply' || 'Plan' }} (${{ github.event.inputs.target }})
     needs: validate
-    if: github.event_name == 'workflow_dispatch' && inputs.run_plan
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.working_directory == 'global/policies' && 'policies' || 'bootstrap' }}
-    defaults:
-      run:
-        working-directory: ${{ github.event.inputs.working_directory }}
+    environment: ${{ vars.TF_ENVIRONMENT || 'dev' }}
+    concurrency:
+      group: terraform-${{ github.event.inputs.target }}-${{ vars.TF_ENVIRONMENT }}
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -127,13 +143,113 @@ jobs:
           terraform_version_file: .terraform-version
           terraform_wrapper: false
 
-      - name: Terraform Init
-        run: terraform init -backend=false
+      - name: Load Terraform helpers
+        run: chmod +x .github/scripts/terraform-common.sh
 
-      - name: Terraform Plan
+      - name: Bootstrap init
+        if: inputs.target == 'all' || inputs.target == 'global/bootstrap'
         run: |
-          terraform plan -input=false -no-color \
-            -var="project_name=${{ vars.TF_PROJECT_NAME }}" \
-            -var="environment=${{ vars.TF_ENVIRONMENT }}" \
-            -var="region=${{ vars.AWS_REGION }}" \
-            -var="aws_account_id=${{ vars.AWS_ACCOUNT_ID }}"
+          source .github/scripts/terraform-common.sh
+          bootstrap_init global/bootstrap
+
+      - name: Bootstrap plan
+        if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
+        working-directory: global/bootstrap
+        run: |
+          source ../../.github/scripts/terraform-common.sh
+          mapfile -t var_args < <(tf_var_args)
+          terraform plan -input=false -no-color "${var_args[@]}"
+
+      - name: Bootstrap apply
+        if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
+        working-directory: global/bootstrap
+        run: |
+          source ../../.github/scripts/terraform-common.sh
+          mapfile -t var_args < <(tf_var_args)
+          terraform apply -input=false -auto-approve -no-color "${var_args[@]}"
+
+      - name: Migrate bootstrap state to S3
+        if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
+        run: |
+          source .github/scripts/terraform-common.sh
+          maybe_migrate_bootstrap_state global/bootstrap
+
+      - name: Print bootstrap repository variables
+        if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
+        working-directory: global/bootstrap
+        run: |
+          echo "Save these as GitHub repository variables for plan-only workflows:"
+          echo "TF_STATE_BUCKET=$(terraform output -raw state_bucket_name)"
+          echo "TF_STATE_KMS_KEY_ID=$(terraform output -raw kms_key_id)"
+          echo "TF_STATE_DYNAMODB_TABLE=$(terraform output -raw dynamodb_table_name)"
+          echo "TF_STATE_KMS_KEY_ARN=$(terraform output -raw kms_key_arn)"
+
+      - name: Export bootstrap outputs
+        if: inputs.target == 'all' || inputs.target == 'global/policies' || inputs.target == 'environments/dev'
+        run: |
+          source .github/scripts/terraform-common.sh
+          if [ "${{ inputs.operation }}" = "apply" ] && { [ "${{ inputs.target }}" = "all" ] || [ "${{ inputs.target }}" = "global/bootstrap" ]; }; then
+            export_bootstrap_outputs global/bootstrap
+          elif [ -n "${TF_STATE_BUCKET:-}" ] && [ -n "${TF_STATE_KMS_KEY_ID:-}" ] && [ -n "${TF_STATE_DYNAMODB_TABLE:-}" ] && [ -n "${TF_STATE_KMS_KEY_ARN:-}" ]; then
+            export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
+            export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
+            export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
+            export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN}"
+            export TF_BACKEND_REGION="${AWS_REGION}"
+          else
+            echo "::error::Bootstrap remote state values are required. Either run apply for global/bootstrap (or all) in this workflow, or set repository variables TF_STATE_BUCKET, TF_STATE_KMS_KEY_ID, TF_STATE_DYNAMODB_TABLE, and TF_STATE_KMS_KEY_ARN from bootstrap outputs."
+            exit 1
+          fi
+          {
+            echo "TF_BACKEND_BUCKET=${TF_BACKEND_BUCKET}"
+            echo "TF_BACKEND_KMS_KEY_ID=${TF_BACKEND_KMS_KEY_ID}"
+            echo "TF_BACKEND_DYNAMODB_TABLE=${TF_BACKEND_DYNAMODB_TABLE}"
+            echo "TF_STATE_KMS_KEY_ARN=${TF_STATE_KMS_KEY_ARN}"
+            echo "TF_BACKEND_REGION=${TF_BACKEND_REGION}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Policies init
+        if: inputs.target == 'all' || inputs.target == 'global/policies'
+        run: |
+          source .github/scripts/terraform-common.sh
+          tf_init_s3_backend global/policies global/policies/terraform.tfstate
+
+      - name: Policies plan
+        if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'global/policies')
+        working-directory: global/policies
+        run: |
+          source ../../.github/scripts/terraform-common.sh
+          mapfile -t var_args < <(tf_var_args)
+          terraform plan -input=false -no-color "${var_args[@]}"
+
+      - name: Policies apply
+        if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'global/policies')
+        working-directory: global/policies
+        run: |
+          source ../../.github/scripts/terraform-common.sh
+          mapfile -t var_args < <(tf_var_args)
+          terraform apply -input=false -auto-approve -no-color "${var_args[@]}"
+
+      - name: Dev init
+        if: inputs.target == 'all' || inputs.target == 'environments/dev'
+        run: |
+          source .github/scripts/terraform-common.sh
+          tf_init_s3_backend environments/dev dev/terraform.tfstate
+
+      - name: Dev plan
+        if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'environments/dev')
+        working-directory: environments/dev
+        run: |
+          source ../../.github/scripts/terraform-common.sh
+          mapfile -t var_args < <(tf_var_args)
+          mapfile -t dev_args < <(tf_dev_extra_var_args)
+          terraform plan -input=false -no-color "${var_args[@]}" "${dev_args[@]}"
+
+      - name: Dev apply
+        if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'environments/dev')
+        working-directory: environments/dev
+        run: |
+          source ../../.github/scripts/terraform-common.sh
+          mapfile -t var_args < <(tf_var_args)
+          mapfile -t dev_args < <(tf_dev_extra_var_args)
+          terraform apply -input=false -auto-approve -no-color "${var_args[@]}" "${dev_args[@]}"

@@ -25,4 +25,6 @@ module "eks" {
 
 ## CI
 
-[`.github/workflows/terraform.yml`](.github/workflows/terraform.yml) runs `terraform fmt`, `validate`, and TFLint on pull requests and pushes to `main`. Optional `terraform plan` against AWS is available via **workflow_dispatch** (requires OIDC; see [bootstrap README](global/bootstrap/README.md#github-actions)).
+[`.github/workflows/terraform.yml`](.github/workflows/terraform.yml) runs `terraform fmt`, `validate`, and TFLint on pull requests and pushes to `main`.
+
+**Deploy via GitHub Actions:** Actions → Terraform → Run workflow → **operation** `plan` or `apply`, **target** `all` (runs `global/bootstrap` → `global/policies` → `environments/dev`). Requires OIDC (`AWS_ROLE_ARN` secret) and repository variables — see [bootstrap README](global/bootstrap/README.md#github-actions).

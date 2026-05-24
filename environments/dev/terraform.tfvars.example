@@ -1,0 +1,38 @@
+project_name   = "platform"
+environment    = "dev"
+region         = "us-east-1"
+aws_account_id = "000000000000" # Replace with your 12-digit AWS account ID
+
+cluster_version = "1.29"
+
+vpc_cidr             = "10.0.0.0/16"
+azs                  = ["us-east-1a", "us-east-1b"]
+private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
+public_subnet_cidrs  = ["10.0.101.0/24", "10.0.102.0/24"]
+
+node_groups = {
+  general = {
+    instance_types = ["t3.medium"]
+    capacity_type  = "ON_DEMAND"
+    min_size       = 1
+    max_size       = 3
+    desired_size   = 2
+    disk_size_gb   = 20
+    labels         = {}
+    taints         = []
+    ami_type       = "AL2_x86_64"
+  }
+}
+
+# From global/bootstrap outputs:
+state_bucket_name   = "platform-dev-terraform-state-000000000000"
+state_kms_key_id    = "00000000-0000-0000-0000-000000000000"
+dynamodb_table_name = "platform-dev-terraform-locks"
+state_kms_key_arn   = "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-0000-0000-000000000000"
+
+tags = {
+  project     = "platform"
+  environment = "dev"
+  managed_by  = "terraform"
+  owner       = "platform-team"
+}
