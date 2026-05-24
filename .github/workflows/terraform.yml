@@ -251,6 +251,13 @@ jobs:
           source .github/scripts/terraform-common.sh
           import_existing_dev_resources environments/dev
 
+      # TODO: Remove after my-project-dev-eks is in Terraform state (recovery from partial apply).
+      - name: Import EKS cluster into state (recovery)
+        if: inputs.target == 'all' || inputs.target == 'environments/dev'
+        run: |
+          source .github/scripts/terraform-common.sh
+          import_eks_cluster_recovery environments/dev
+
       - name: Dev plan
         if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |

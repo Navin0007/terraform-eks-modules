@@ -305,14 +305,44 @@ verify_eks_cluster_state() {
   popd >/dev/null
 }
 
-# Init remote state, import existing AWS objects, and verify the EKS cluster is in state.
+# Explicit EKS cluster import for CI recovery (remove this helper after state is healthy).
+import_eks_cluster_recovery() {
+  local dev_dir="${1:-environments/dev}"
+  local cluster_name cluster_addr
+
+  tf_export_dev_vars
+  tf_init_s3_backend "${dev_dir}" dev/terraform.tfstate
+  cluster_name="$(eks_cluster_name)"
+  cluster_addr="module.eks.aws_eks_cluster.main"
+
+  pushd "${dev_dir}" >/dev/null
+
+  if terraform state show -no-color "${cluster_addr}" &>/dev/null; then
+    echo "${cluster_addr} is already in Terraform state; skipping import."
+    popd >/dev/null
+    return 0
+  fi
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    echo "EKS cluster ${cluster_name} not found in AWS; skipping import."
+    popd >/dev/null
+    return 0
+  fi
+
+  echo "==> terraform import ${cluster_addr} ${cluster_name}"
+  terraform import -input=false "${cluster_addr}" "${cluster_name}"
+  terraform state show -no-color "${cluster_addr}"
+  echo "Import complete."
+
+  popd >/dev/null
+}
+
+# Final check before plan/apply (import runs in earlier workflow steps).
 dev_stack_prepare() {
   local dev_dir="${1:-environments/dev}"
 
   tf_export_dev_vars
   tf_init_s3_backend "${dev_dir}" dev/terraform.tfstate
-  import_existing_dev_resources "${dev_dir}"
-  ensure_eks_cluster_imported "${dev_dir}"
   verify_eks_cluster_state "${dev_dir}"
 }
 
@@ -356,8 +386,6 @@ import_existing_dev_resources() {
 
     return 1
   }
-
-  ensure_eks_cluster_imported "." || return 1
 
   if aws logs describe-log-groups --log-group-name-prefix "${log_group_name}" \
     --query "logGroups[?logGroupName=='${log_group_name}'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
