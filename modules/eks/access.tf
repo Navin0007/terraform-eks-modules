@@ -2,6 +2,8 @@ resource "aws_eks_access_entry" "node" {
   cluster_name  = aws_eks_cluster.main.name
   principal_arn = var.node_role_arn
   type          = "EC2_LINUX"
+
+  depends_on = [null_resource.ensure_eks_authentication_mode]
 }
 
 resource "aws_eks_access_policy_association" "node" {
@@ -12,4 +14,6 @@ resource "aws_eks_access_policy_association" "node" {
   access_scope {
     type = "cluster"
   }
+
+  depends_on = [aws_eks_access_entry.node]
 }

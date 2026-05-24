@@ -433,9 +433,25 @@ import_eks_cluster_recovery() {
   recover_eks_cluster_before_apply "${1:-environments/dev}"
 }
 
-# Prepare dev stack before plan/apply (init + cluster recovery).
+# Upgrade CONFIG_MAP → API_AND_CONFIG_MAP in-place (required for aws_eks_access_entry).
+upgrade_eks_authentication_mode_if_needed() {
+  tf_export_dev_vars
+  local cluster_name
+  cluster_name="$(eks_cluster_name)"
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    return 0
+  fi
+
+  local repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+  CLUSTER_NAME="${cluster_name}" AWS_REGION="${AWS_REGION}" \
+    bash "${repo_root}/modules/eks/scripts/upgrade-eks-authentication-mode.sh"
+}
+
+# Prepare dev stack before plan/apply (init + cluster recovery + auth mode).
 dev_stack_prepare() {
   recover_eks_cluster_before_apply "${1:-environments/dev}"
+  upgrade_eks_authentication_mode_if_needed
 }
 
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).

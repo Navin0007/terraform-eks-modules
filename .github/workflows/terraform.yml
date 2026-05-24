@@ -258,6 +258,12 @@ jobs:
           source .github/scripts/terraform-common.sh
           import_eks_cluster_recovery environments/dev
 
+      - name: Upgrade EKS authentication mode
+        if: inputs.target == 'all' || inputs.target == 'environments/dev'
+        run: |
+          source .github/scripts/terraform-common.sh
+          upgrade_eks_authentication_mode_if_needed
+
       - name: Dev plan
         if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
@@ -271,7 +277,7 @@ jobs:
         if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
-          recover_eks_cluster_before_apply environments/dev
+          dev_stack_prepare environments/dev
           dev_import_diagnostics environments/dev
           pushd environments/dev >/dev/null
           terraform apply -input=false -auto-approve -no-color
