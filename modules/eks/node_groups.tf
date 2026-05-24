@@ -23,11 +23,8 @@ resource "aws_launch_template" "node_group" {
     instance_metadata_tags      = "enabled"
   }
 
-  # Instance-level SGs (not network_interfaces) so EKS can attach subnets and merge bootstrap user data.
-  vpc_security_group_ids = [
-    var.node_sg_id,
-    aws_eks_cluster.main.vpc_config[0].cluster_security_group_id,
-  ]
+  # Do not set security groups here — EKS attaches the cluster security group and merges AL2023 bootstrap user data.
+  # Custom SGs in launch templates block that behavior and break node join on private clusters.
 
   tag_specifications {
     resource_type = "instance"
@@ -106,11 +103,7 @@ resource "aws_eks_node_group" "main" {
   depends_on = [
     aws_eks_cluster.main,
     aws_eks_access_entry.node,
-    aws_vpc_security_group_ingress_rule.cluster_sg_from_node_sg_https,
-    aws_vpc_security_group_ingress_rule.cluster_sg_from_node_sg_kubelet,
-    aws_vpc_security_group_egress_rule.cluster_sg_to_node_sg_https,
-    aws_vpc_security_group_egress_rule.cluster_sg_to_node_sg_kubelet,
-    aws_vpc_security_group_ingress_rule.node_sg_from_cluster_sg,
-    aws_vpc_security_group_egress_rule.node_sg_to_cluster_sg_https,
+    aws_vpc_security_group_ingress_rule.control_plane_from_cluster_sg_https,
+    aws_vpc_security_group_egress_rule.control_plane_to_cluster_sg_kubelet,
   ]
 }

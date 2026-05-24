@@ -450,6 +450,7 @@ upgrade_eks_authentication_mode_if_needed() {
 
 # Delete node groups stuck in CREATE_FAILED so the next apply can recreate them.
 delete_failed_eks_node_groups() {
+  local dev_dir="${1:-environments/dev}"
   tf_export_dev_vars
   local cluster_name nodegroup_name status
   cluster_name="$(eks_cluster_name)"
@@ -480,6 +481,11 @@ delete_failed_eks_node_groups() {
         --cluster-name "${cluster_name}" \
         --nodegroup-name "${nodegroup_name}" \
         --region "${AWS_REGION}"
+      if [ -d "${dev_dir}/.terraform" ]; then
+        pushd "${dev_dir}" >/dev/null
+        terraform state rm 'module.eks.aws_eks_node_group.main["general"]' 2>/dev/null || true
+        popd >/dev/null
+      fi
       ;;
     DELETING)
       echo "Waiting for node group ${nodegroup_name} deletion..."
@@ -495,7 +501,7 @@ delete_failed_eks_node_groups() {
 dev_stack_prepare() {
   recover_eks_cluster_before_apply "${1:-environments/dev}"
   upgrade_eks_authentication_mode_if_needed
-  delete_failed_eks_node_groups
+  delete_failed_eks_node_groups "${1:-environments/dev}"
 }
 
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).

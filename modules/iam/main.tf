@@ -100,6 +100,13 @@ resource "aws_iam_role_policy_attachment" "node_cni" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
 }
 
+resource "aws_iam_role_policy_attachment" "node_ssm" {
+  count = var.create_core_roles ? 1 : 0
+
+  role       = aws_iam_role.node[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 data "aws_iam_role" "cluster" {
   count = var.create_core_roles ? 0 : 1
   name  = "${var.cluster_name}-cluster"
