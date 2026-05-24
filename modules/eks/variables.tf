@@ -14,8 +14,29 @@ variable "cluster_name" {
 }
 
 variable "cluster_version" {
-  description = "Kubernetes version for the EKS control plane (for example, 1.29)."
+  description = "Kubernetes version for the EKS control plane (for example, 1.29). Use lifecycle ignore_changes on the cluster for imports."
   type        = string
+}
+
+variable "authentication_mode" {
+  description = "EKS authentication mode. Leave null for existing clusters (avoids forced replacement). Use API_AND_CONFIG_MAP for new clusters with access entries."
+  type        = string
+  default     = null
+
+  validation {
+    condition = (
+      var.authentication_mode == null
+      ? true
+      : contains(["API", "API_AND_CONFIG_MAP", "CONFIG_MAP"], var.authentication_mode)
+    )
+    error_message = "authentication_mode must be API, API_AND_CONFIG_MAP, or CONFIG_MAP."
+  }
+}
+
+variable "bootstrap_cluster_creator_admin_permissions" {
+  description = "Grant cluster-creator admin when setting authentication_mode on a new cluster."
+  type        = bool
+  default     = true
 }
 
 variable "region" {

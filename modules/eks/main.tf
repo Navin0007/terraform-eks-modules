@@ -29,13 +29,26 @@ resource "aws_eks_cluster" "main" {
 
   enabled_cluster_log_types = var.cluster_log_types
 
-  access_config {
-    authentication_mode = "API_AND_CONFIG_MAP"
+  # Omit by default on imported clusters — setting this on an existing CONFIG_MAP
+  # cluster forces replacement (CreateCluster 409). Set authentication_mode on new clusters.
+  dynamic "access_config" {
+    for_each = var.authentication_mode != null ? [1] : []
+
+    content {
+      authentication_mode                         = var.authentication_mode
+      bootstrap_cluster_creator_admin_permissions = var.bootstrap_cluster_creator_admin_permissions
+    }
   }
 
   tags = merge(local.common_tags, {
     Name = local.cluster_name
   })
+
+  lifecycle {
+    ignore_changes = [
+      version,
+    ]
+  }
 
   depends_on = [aws_cloudwatch_log_group.cluster]
 }

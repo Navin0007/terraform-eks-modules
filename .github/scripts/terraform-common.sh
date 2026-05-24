@@ -59,16 +59,18 @@ eks_cluster_in_state() {
   terraform state list -no-color 2>/dev/null | grep -Fxq "${cluster_addr}"
 }
 
-# True when terraform plan wants to create the EKS cluster resource.
-eks_cluster_plan_wants_create() {
+# True when terraform plan wants to create or replace the EKS cluster (replace triggers CreateCluster → 409).
+eks_cluster_plan_wants_recreate() {
   local cluster_addr="${1:-module.eks.aws_eks_cluster.main}"
   local plan_log
   plan_log="$(mktemp)"
 
-  terraform plan -input=false -no-color -refresh=false >"${plan_log}" 2>&1 || true
+  terraform plan -input=false -no-color >"${plan_log}" 2>&1 || true
 
   if grep -qF "${cluster_addr} will be created" "${plan_log}" \
-    || grep -qF 'aws_eks_cluster.main will be created' "${plan_log}"; then
+    || grep -qF 'aws_eks_cluster.main will be created' "${plan_log}" \
+    || grep -qF "${cluster_addr} must be replaced" "${plan_log}" \
+    || grep -qF 'aws_eks_cluster.main must be replaced' "${plan_log}"; then
     rm -f "${plan_log}"
     return 0
   fi
@@ -96,14 +98,23 @@ recover_eks_cluster_before_apply() {
     return 0
   fi
 
-  if eks_cluster_in_state "${cluster_addr}" && ! eks_cluster_plan_wants_create "${cluster_addr}"; then
+  if eks_cluster_in_state "${cluster_addr}" && ! eks_cluster_plan_wants_recreate "${cluster_addr}"; then
     echo "${cluster_addr} is in state and plan does not recreate it; OK to apply."
     popd >/dev/null
     return 0
   fi
 
+  if eks_cluster_in_state "${cluster_addr}" && eks_cluster_plan_wants_recreate "${cluster_addr}"; then
+    echo "::error::${cluster_addr} is in state but plan wants to create/replace the cluster (config drift)."
+    echo "::error::Common causes: access_config authentication_mode change or cluster version mismatch."
+    echo "::error::This module omits access_config by default on imports. Pull latest main and re-run apply."
+    terraform plan -input=false -no-color || true
+    popd >/dev/null
+    return 1
+  fi
+
   if eks_cluster_in_state "${cluster_addr}"; then
-    echo "::warning::${cluster_addr} is in state but plan still wants to create it; re-importing."
+    echo "::warning::${cluster_addr} is in state but plan wants recreate; re-importing."
     terraform state rm -input=false "${cluster_addr}" || true
   else
     echo "${cluster_addr} missing from state but cluster exists in AWS; importing."
@@ -122,8 +133,8 @@ recover_eks_cluster_before_apply() {
     return 1
   fi
 
-  if eks_cluster_plan_wants_create "${cluster_addr}"; then
-    echo "::error::Plan still wants to create ${cluster_addr} after import."
+  if eks_cluster_plan_wants_recreate "${cluster_addr}"; then
+    echo "::error::Plan still wants to create/replace ${cluster_addr} after import."
     terraform plan -input=false -no-color || true
     popd >/dev/null
     return 1
