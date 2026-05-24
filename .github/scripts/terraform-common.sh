@@ -54,6 +54,85 @@ eks_cluster_exists_in_aws() {
   aws eks describe-cluster --name "${cluster_name}" --region "${AWS_REGION}" &>/dev/null
 }
 
+eks_cluster_in_state() {
+  local cluster_addr="${1:-module.eks.aws_eks_cluster.main}"
+  terraform state list -no-color 2>/dev/null | grep -Fxq "${cluster_addr}"
+}
+
+# True when terraform plan wants to create the EKS cluster resource.
+eks_cluster_plan_wants_create() {
+  local cluster_addr="${1:-module.eks.aws_eks_cluster.main}"
+  local plan_log
+  plan_log="$(mktemp)"
+
+  terraform plan -input=false -no-color -refresh=false >"${plan_log}" 2>&1 || true
+
+  if grep -qF "${cluster_addr} will be created" "${plan_log}" \
+    || grep -qF 'aws_eks_cluster.main will be created' "${plan_log}"; then
+    rm -f "${plan_log}"
+    return 0
+  fi
+
+  rm -f "${plan_log}"
+  return 1
+}
+
+# Import or re-import the cluster when AWS has it but Terraform plans to create it.
+recover_eks_cluster_before_apply() {
+  local dev_dir="${1:-environments/dev}"
+  local cluster_name cluster_addr
+  local import_status=0
+
+  tf_export_dev_vars
+  tf_init_s3_backend "${dev_dir}" dev/terraform.tfstate
+  cluster_name="$(eks_cluster_name)"
+  cluster_addr="module.eks.aws_eks_cluster.main"
+
+  pushd "${dev_dir}" >/dev/null
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    echo "EKS cluster ${cluster_name} not in AWS; apply will create it."
+    popd >/dev/null
+    return 0
+  fi
+
+  if eks_cluster_in_state "${cluster_addr}" && ! eks_cluster_plan_wants_create "${cluster_addr}"; then
+    echo "${cluster_addr} is in state and plan does not recreate it; OK to apply."
+    popd >/dev/null
+    return 0
+  fi
+
+  if eks_cluster_in_state "${cluster_addr}"; then
+    echo "::warning::${cluster_addr} is in state but plan still wants to create it; re-importing."
+    terraform state rm -input=false "${cluster_addr}" || true
+  else
+    echo "${cluster_addr} missing from state but cluster exists in AWS; importing."
+  fi
+
+  echo "==> terraform import -target=${cluster_addr} ${cluster_addr} ${cluster_name}"
+  set +e
+  terraform import -input=false -target="${cluster_addr}" "${cluster_addr}" "${cluster_name}"
+  import_status=$?
+  set -e
+
+  if [ "${import_status}" -ne 0 ]; then
+    echo "::error::terraform import failed with status ${import_status}"
+    dev_import_diagnostics "${dev_dir}"
+    popd >/dev/null
+    return 1
+  fi
+
+  if eks_cluster_plan_wants_create "${cluster_addr}"; then
+    echo "::error::Plan still wants to create ${cluster_addr} after import."
+    terraform plan -input=false -no-color || true
+    popd >/dev/null
+    return 1
+  fi
+
+  echo "Cluster recovered in state; safe to apply."
+  popd >/dev/null
+}
+
 # Print context when debugging import/state issues in CI.
 dev_import_diagnostics() {
   local dev_dir="${1:-environments/dev}"
@@ -338,58 +417,14 @@ verify_eks_cluster_state() {
   popd >/dev/null
 }
 
-# Explicit EKS cluster import for CI recovery (remove this helper after state is healthy).
+# Explicit EKS cluster import for CI recovery (remove after state is healthy).
 import_eks_cluster_recovery() {
-  local dev_dir="${1:-environments/dev}"
-  local cluster_name cluster_addr
-  local import_status=0
-
-  tf_export_dev_vars
-  tf_init_s3_backend "${dev_dir}" dev/terraform.tfstate
-  cluster_name="$(eks_cluster_name)"
-  cluster_addr="module.eks.aws_eks_cluster.main"
-
-  pushd "${dev_dir}" >/dev/null
-
-  if terraform state show -no-color "${cluster_addr}" &>/dev/null; then
-    echo "${cluster_addr} is already in Terraform state; skipping import."
-    popd >/dev/null
-    return 0
-  fi
-
-  echo "==> terraform import -target=${cluster_addr} ${cluster_addr} ${cluster_name}"
-  set +e
-  terraform import -input=false -target="${cluster_addr}" "${cluster_addr}" "${cluster_name}"
-  import_status=$?
-  set -e
-
-  if [ "${import_status}" -eq 0 ]; then
-    terraform state show -no-color "${cluster_addr}"
-    echo "Import complete."
-    popd >/dev/null
-    return 0
-  fi
-
-  echo "::warning::terraform import exited with status ${import_status}"
-
-  if eks_cluster_exists_in_aws "${cluster_name}"; then
-    echo "::error::Cluster ${cluster_name} exists in AWS but import failed. See diagnostics above."
-    dev_import_diagnostics "${dev_dir}"
-    popd >/dev/null
-    return 1
-  fi
-
-  echo "Cluster not found in AWS; it will be created on apply."
-  popd >/dev/null
-  return 0
+  recover_eks_cluster_before_apply "${1:-environments/dev}"
 }
 
-# Final check before plan/apply (import runs in the same or an earlier workflow step).
+# Prepare dev stack before plan/apply (init + cluster recovery).
 dev_stack_prepare() {
-  local dev_dir="${1:-environments/dev}"
-
-  tf_export_dev_vars
-  verify_eks_cluster_state "${dev_dir}"
+  recover_eks_cluster_before_apply "${1:-environments/dev}"
 }
 
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
