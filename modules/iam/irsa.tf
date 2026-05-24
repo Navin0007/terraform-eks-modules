@@ -1,8 +1,9 @@
 locals {
-  irsa_enabled         = var.oidc_provider_arn != ""
   bare_oidc_issuer_url = replace(var.cluster_oidc_issuer_url, "https://", "")
 
-  irsa_policy_attachments = local.irsa_enabled ? merge([
+  # Use var.irsa_roles (not oidc_provider_arn) so for_each keys are known at plan time.
+  # First IAM pass passes irsa_roles = {}; second pass passes roles after EKS creates OIDC.
+  irsa_policy_attachments = length(var.irsa_roles) > 0 ? merge([
     for role_key, role in var.irsa_roles : {
       for policy_arn in role.policy_arns :
       "${role_key}/${policy_arn}" => {
@@ -14,7 +15,7 @@ locals {
 }
 
 data "aws_iam_policy_document" "irsa_trust" {
-  for_each = local.irsa_enabled ? var.irsa_roles : {}
+  for_each = var.irsa_roles
 
   statement {
     effect = "Allow"
@@ -41,7 +42,7 @@ data "aws_iam_policy_document" "irsa_trust" {
 }
 
 resource "aws_iam_role" "irsa" {
-  for_each = local.irsa_enabled ? var.irsa_roles : {}
+  for_each = var.irsa_roles
 
   name               = "${var.project_name}-${var.environment}-${each.key}-irsa"
   assume_role_policy = data.aws_iam_policy_document.irsa_trust[each.key].json

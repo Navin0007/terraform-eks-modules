@@ -9,7 +9,7 @@ EKS requires IAM roles before the cluster can be created, but IRSA roles require
 1. **First pass** — Provide cluster and node policy ARNs from `global/policies`. Leave `oidc_provider_arn` and `cluster_oidc_issuer_url` empty (defaults). The module creates only the cluster and node roles.
 2. **Second pass** — After `module.eks` exposes OIDC outputs, set `oidc_provider_arn` and `cluster_oidc_issuer_url`, and populate `irsa_roles`. Re-apply to create IRSA roles and policy attachments.
 
-IRSA resources are skipped when `oidc_provider_arn` or `cluster_oidc_issuer_url` is empty, so the first pass applies cleanly without OIDC values.
+IRSA resources are skipped when `irsa_roles` is empty (first pass). The second pass supplies `irsa_roles` plus `oidc_provider_arn` and `cluster_oidc_issuer_url` from the EKS module.
 
 ## IRSA trust policy
 
