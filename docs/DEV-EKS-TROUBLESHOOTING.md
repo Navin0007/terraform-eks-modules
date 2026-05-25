@@ -141,11 +141,13 @@ History of issues seen while bringing up **my-project / dev** (`my-project-dev-e
 
 **Fix (current approach):**
 
-- Delete stale **`EC2_LINUX`** access entry for the node role.
-- **Merge** node role into `aws-auth` `mapRoles` (kubectl patch), do not replace the whole ConfigMap.
-- Fail CI if the node role is missing from `aws-auth` after merge.
+- Delete **any** EKS access entry for the node role (EKS recreates one when the node group is created; API auth is tried first and can return `Unauthorized` even when `aws-auth` is correct).
+- Create the node group at **scale 0**, delete the access entry, refresh `aws-auth`, then **scale out** (`after-nodegroup-auth.sh`).
+- **Merge** node role into `aws-auth` `mapRoles` (validated YAML via PyYAML).
 - Use **AL2023** AMI for Kubernetes 1.30.
 - Enable public API in dev so GitHub Actions can update `aws-auth`.
+
+**Reference:** `modules/eks/node_groups.tf` (scale 0 + `null_resource.node_group_scale_out`); `modules/eks/scripts/after-nodegroup-auth.sh`; `modules/eks/scripts/delete-node-access-entry.sh`.
 
 ---
 

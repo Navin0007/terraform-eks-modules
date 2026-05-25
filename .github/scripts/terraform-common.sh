@@ -781,11 +781,20 @@ diagnose_node_join_failure() {
 
   local node_role_arn
   node_role_arn="$(node_iam_role_arn "${cluster_name}" 2>/dev/null || echo "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node")"
-  echo "--- access entries for node role (should be empty for managed nodes) ---"
-  aws eks list-access-entries \
+  echo "--- access entry for node role (should be absent for API_AND_CONFIG_MAP managed nodes) ---"
+  if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
-    --region "${AWS_REGION}" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -F "${node_role_arn}" || echo "(node role not in access entries — expected)"
+    --principal-arn "${node_role_arn}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    aws eks describe-access-entry \
+      --cluster-name "${cluster_name}" \
+      --principal-arn "${node_role_arn}" \
+      --region "${AWS_REGION}" \
+      --output json 2>/dev/null || true
+    echo "::error::Node access entry still present — API auth may block aws-auth (causes Unauthorized)."
+  else
+    echo "(no access entry for node role — expected)"
+  fi
 
   echo "--- aws-auth mapRoles (node role should appear here) ---"
   aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null 2>&1 || true

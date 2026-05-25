@@ -23,10 +23,11 @@ resource "aws_eks_node_group" "main" {
     }
   }
 
+  # Start at scale 0; after-nodegroup-auth.sh removes API access entries then scales out.
   scaling_config {
-    min_size     = each.value.min_size
+    min_size     = 0
     max_size     = each.value.max_size
-    desired_size = each.value.desired_size
+    desired_size = 0
   }
 
   update_config {
@@ -38,7 +39,7 @@ resource "aws_eks_node_group" "main" {
   })
 
   lifecycle {
-    ignore_changes = [scaling_config[0].desired_size]
+    ignore_changes = [scaling_config]
   }
 
   depends_on = [
@@ -48,4 +49,31 @@ resource "aws_eks_node_group" "main" {
     aws_vpc_security_group_ingress_rule.control_plane_from_cluster_sg_https,
     aws_vpc_security_group_egress_rule.control_plane_to_cluster_sg_kubelet,
   ]
+}
+
+resource "null_resource" "node_group_scale_out" {
+  for_each = var.manage_aws_auth_configmap ? var.node_groups : {}
+
+  triggers = {
+    node_group_id = aws_eks_node_group.main[each.key].id
+    desired_size  = each.value.desired_size
+    min_size      = each.value.min_size
+    max_size      = each.value.max_size
+    node_role_arn = var.node_role_arn
+  }
+
+  provisioner "local-exec" {
+    command = "bash ${path.module}/scripts/after-nodegroup-auth.sh"
+    environment = {
+      CLUSTER_NAME   = aws_eks_cluster.main.name
+      NODEGROUP_NAME = each.key
+      NODE_ROLE_ARN  = var.node_role_arn
+      AWS_REGION     = var.region
+      DESIRED_SIZE   = each.value.desired_size
+      MIN_SIZE       = each.value.min_size
+      MAX_SIZE       = each.value.max_size
+    }
+  }
+
+  depends_on = [aws_eks_node_group.main]
 }
