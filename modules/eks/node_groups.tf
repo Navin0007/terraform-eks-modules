@@ -1,9 +1,21 @@
-# Minimal launch template: IMDS hop limit for AL2023/nodeadm only (no custom SGs or AMI).
+# Launch template: disk + IMDS only (no custom SGs/AMI — EKS merges those and bootstrap user data).
 resource "aws_launch_template" "node_group" {
   for_each = var.node_groups
 
   name_prefix = "${local.cluster_name}-${each.key}-"
-  description = "EKS managed node group ${each.key} (IMDS settings only)"
+  description = "EKS managed node group ${each.key}"
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+
+    ebs {
+      volume_size           = each.value.disk_size_gb
+      volume_type           = "gp3"
+      encrypted             = true
+      kms_key_id            = var.kms_key_arn
+      delete_on_termination = true
+    }
+  }
 
   metadata_options {
     http_endpoint               = "enabled"
@@ -39,7 +51,6 @@ resource "aws_eks_node_group" "main" {
   ami_type       = each.value.ami_type
   capacity_type  = each.value.capacity_type
   instance_types = each.value.instance_types
-  disk_size      = each.value.disk_size_gb
 
   labels = each.value.labels
 
