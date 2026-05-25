@@ -32,7 +32,13 @@ wait_for_ready_nodes() {
     total="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
 
     echo "Node join check ${attempt}/45: Ready=${ready}/${total} (want >= ${desired_size})"
-    kubectl get nodes -o wide 2>/dev/null || true
+    aws eks describe-nodegroup \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${NODEGROUP_NAME:-general}" \
+      --region "${region}" \
+      --query 'nodegroup.{status:status,desired:scalingConfig.desiredSize,health:health}' \
+      --output json 2>/dev/null || true
+    kubectl get nodes -o wide 2>/dev/null || echo "(kubectl get nodes failed or no nodes)"
 
     if [ "${ready}" -ge "${desired_size}" ] && [ "${ready}" -gt 0 ]; then
       echo "Nodes are Ready."

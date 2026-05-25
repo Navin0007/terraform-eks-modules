@@ -324,6 +324,29 @@ Prepare order: `upgrade_eks_authentication_mode_if_needed` → `migrate_dev_clus
 
 ---
 
+## Issue 18: API mode + EC2_LINUX entry but still Unauthorized
+
+**Symptoms**
+
+- `authMode`: `API`, EC2_LINUX access entry present
+- `kubernetesGroups` may show only `system:nodes` (missing `system:bootstrappers` on describe)
+- `CreateAccessEntry` 409 in Terraform (entry created by CI script, not imported)
+- Kubelet still `Unauthorized`
+
+**Cause**
+
+EC2_LINUX access entries also need **`AmazonEKSNodegroupPolicy`** associated (`aws eks associate-access-policy`). Without it, the API authorizer rejects kubelet registration even when the entry exists.
+
+**Fix**
+
+| Change | File |
+|--------|------|
+| `aws_eks_access_policy_association` for `AmazonEKSNodegroupPolicy` | `modules/eks/access.tf` |
+| CI associates policy + imports entry/policy into state | `ensure-node-access-policy.sh`, `import_eks_node_access_to_state` |
+| Node group waits for entry + policy before create | `modules/eks/node_groups.tf` |
+
+---
+
 ## Symptom → first place to look
 
 | Symptom | First reference |

@@ -31,6 +31,8 @@ ensure_node_cluster_auth() {
           --type EC2_LINUX \
           --region "${region}"
       fi
+      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
+        bash "${script_dir}/ensure-node-access-policy.sh"
       ;;
     API_AND_CONFIG_MAP | CONFIG_MAP)
       CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
