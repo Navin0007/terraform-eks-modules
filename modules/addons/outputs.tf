@@ -10,12 +10,12 @@ output "coredns_version" {
 
 output "vpc_cni_arn" {
   description = "ARN of the Amazon VPC CNI EKS add-on."
-  value       = aws_eks_addon.vpc_cni.arn
+  value       = var.install_vpc_cni_addon ? aws_eks_addon.vpc_cni[0].arn : data.aws_eks_addon.vpc_cni[0].arn
 }
 
 output "vpc_cni_version" {
   description = "Version of the Amazon VPC CNI add-on installed on the cluster."
-  value       = aws_eks_addon.vpc_cni.addon_version
+  value       = var.install_vpc_cni_addon ? aws_eks_addon.vpc_cni[0].addon_version : data.aws_eks_addon.vpc_cni[0].addon_version
 }
 
 output "kube_proxy_arn" {
@@ -42,7 +42,7 @@ output "addon_arns" {
   description = "Map of EKS add-on name to add-on ARN for all managed add-ons."
   value = {
     "coredns"            = aws_eks_addon.coredns.arn
-    "vpc-cni"            = aws_eks_addon.vpc_cni.arn
+    "vpc-cni"            = var.install_vpc_cni_addon ? aws_eks_addon.vpc_cni[0].arn : data.aws_eks_addon.vpc_cni[0].arn
     "kube-proxy"         = aws_eks_addon.kube_proxy.arn
     "aws-ebs-csi-driver" = aws_eks_addon.aws_ebs_csi_driver.arn
   }

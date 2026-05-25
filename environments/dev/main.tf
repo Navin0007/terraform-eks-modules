@@ -71,10 +71,6 @@ module "sg" {
 module "eks" {
   source = "../../modules/eks"
 
-  providers = {
-    kubernetes = kubernetes.eks
-  }
-
   project_name    = var.project_name
   environment     = var.environment
   cluster_name    = local.cluster_name
@@ -142,7 +138,9 @@ module "addons" {
   cluster_version  = module.eks.cluster_version
   vpc_cni_role_arn = module.iam_irsa.irsa_role_arns["vpc-cni"]
   ebs_csi_role_arn = module.iam_irsa.irsa_role_arns["ebs-csi"]
-  tags             = local.common_tags
+  # vpc-cni is installed in module.eks before the node group joins.
+  install_vpc_cni_addon = false
+  tags                  = local.common_tags
 
   depends_on = [module.iam_irsa]
 }

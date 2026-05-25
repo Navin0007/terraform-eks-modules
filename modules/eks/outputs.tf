@@ -51,3 +51,8 @@ output "cloudwatch_log_group_name" {
   description = "CloudWatch log group name for EKS control plane logs."
   value       = aws_cloudwatch_log_group.cluster.name
 }
+
+output "vpc_cni_addon_arn" {
+  description = "ARN of the vpc-cni add-on installed before node groups."
+  value       = aws_eks_addon.vpc_cni.arn
+}

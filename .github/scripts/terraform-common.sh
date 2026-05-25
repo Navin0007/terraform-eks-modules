@@ -522,83 +522,21 @@ delete_failed_eks_node_groups() {
   esac
 }
 
-# Import kube-system/aws-auth when EKS already created it (avoids "already exists" on apply).
-import_aws_auth_configmap_if_needed() {
+# Drop removed auth resources from state (EKS now auto-manages aws-auth on node group create).
+cleanup_stale_eks_auth_state() {
   local dev_abs="${1:-environments/dev}"
-  local addr='module.eks.kubernetes_config_map_v1.aws_auth[0]'
-  local import_out import_status
   local did_pushd=false
 
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
-  tf_export_dev_vars
-
-  if ! eks_cluster_exists_in_aws "$(eks_cluster_name)"; then
-    return 0
-  fi
 
   if [ "$(pwd)" != "${dev_abs}" ]; then
     pushd "${dev_abs}" >/dev/null
     did_pushd=true
   fi
 
-  if terraform state show -no-color "${addr}" &>/dev/null; then
-    echo "${addr} is already in Terraform state."
-    [ "${did_pushd}" = true ] && popd >/dev/null
-    return 0
-  fi
-
-  mapfile -t var_args < <(tf_var_args)
-  mapfile -t dev_args < <(tf_dev_extra_var_args)
-
-  echo "Importing existing aws-auth ConfigMap into Terraform state..."
-  set +e
-  import_out="$(terraform import -input=false "${var_args[@]}" "${dev_args[@]}" "${addr}" "kube-system/aws-auth" 2>&1)"
-  import_status=$?
-  set -e
-  echo "${import_out}"
-
-  if [ "${import_status}" -eq 0 ] \
-    || echo "${import_out}" | grep -q "Resource already managed by Terraform"; then
-    echo "aws-auth ConfigMap imported (or already in state)."
-    [ "${did_pushd}" = true ] && popd >/dev/null
-    return 0
-  fi
-
-  if echo "${import_out}" | grep -qiE 'not found|does not exist|cannot be found|no such'; then
-    echo "aws-auth ConfigMap not in cluster yet; Terraform will create it on apply."
-    [ "${did_pushd}" = true ] && popd >/dev/null
-    return 0
-  fi
-
-  echo "::warning::Could not import aws-auth ConfigMap; apply may fail if it already exists in the cluster."
-  [ "${did_pushd}" = true ] && popd >/dev/null
-  return 0
-}
-
-# Apply aws-auth alone so mapRoles is updated before the node group is created.
-apply_aws_auth_configmap_target() {
-  local dev_abs="${1:-environments/dev}"
-  local did_pushd=false
-
-  dev_abs="$(resolve_dev_dir "${dev_abs}")"
-  tf_export_dev_vars
-
-  if ! eks_cluster_exists_in_aws "$(eks_cluster_name)"; then
-    return 0
-  fi
-
-  if [ "$(pwd)" != "${dev_abs}" ]; then
-    pushd "${dev_abs}" >/dev/null
-    did_pushd=true
-  fi
-
-  mapfile -t var_args < <(tf_var_args)
-  mapfile -t dev_args < <(tf_dev_extra_var_args)
-
-  echo "Applying aws-auth ConfigMap (targeted) before node group..."
-  terraform apply -input=false -auto-approve -no-color \
-    "${var_args[@]}" "${dev_args[@]}" \
-    -target='module.eks.kubernetes_config_map_v1.aws_auth[0]'
+  terraform state rm 'module.eks.kubernetes_config_map_v1.aws_auth[0]' 2>/dev/null || true
+  terraform state rm 'module.eks.aws_eks_access_entry.node' 2>/dev/null || true
+  terraform state rm 'module.eks.aws_launch_template.node_group["general"]' 2>/dev/null || true
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
@@ -617,23 +555,43 @@ diagnose_node_join_failure() {
     --query 'nodegroup.{status:status,health:health,resources:resources}' \
     --output json 2>/dev/null || true
 
-  local instance_ids
-  instance_ids="$(aws eks describe-nodegroup \
+  local asg_name
+  asg_name="$(aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
     --nodegroup-name "${nodegroup_name}" \
     --region "${AWS_REGION}" \
     --query 'nodegroup.resources.autoScalingGroups[0].name' \
     --output text 2>/dev/null || true)"
 
-  if [ -n "${instance_ids}" ] && [ "${instance_ids}" != "None" ]; then
+  if [ -n "${asg_name}" ] && [ "${asg_name}" != "None" ]; then
     aws autoscaling describe-auto-scaling-groups \
-      --auto-scaling-group-names "${instance_ids}" \
+      --auto-scaling-group-names "${asg_name}" \
       --query 'AutoScalingGroups[0].Instances[*].InstanceId' \
       --output text 2>/dev/null | tr '\t' '\n' | while read -r iid; do
-        [ -z "${iid}" ] && continue
-        echo "--- console output: ${iid} (last 40 lines) ---"
+        [ -z "${iid}" ] || [ "${iid}" = "None" ] && continue
+        echo "--- console output: ${iid} (last 80 lines) ---"
         aws ec2 get-console-output --instance-id "${iid}" --region "${AWS_REGION}" \
-          --query 'Output' --output text 2>/dev/null | tail -40 || true
+          --query 'Output' --output text 2>/dev/null | tail -80 || true
+        if aws ssm describe-instance-information \
+          --filters "Key=InstanceIds,Values=${iid}" \
+          --query 'InstanceInformationList[0].PingStatus' \
+          --output text 2>/dev/null | grep -q Online; then
+          echo "--- kubelet journal: ${iid} (last 40 lines) ---"
+          aws ssm send-command \
+            --instance-ids "${iid}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["journalctl -u kubelet --no-pager -n 40 2>/dev/null || true"]' \
+            --region "${AWS_REGION}" \
+            --output text --query 'Command.CommandId' 2>/dev/null | while read -r cmd_id; do
+              sleep 8
+              aws ssm get-command-invocation \
+                --command-id "${cmd_id}" \
+                --instance-id "${iid}" \
+                --region "${AWS_REGION}" \
+                --query 'StandardOutputContent' \
+                --output text 2>/dev/null || true
+            done
+        fi
       done
   fi
 }
@@ -643,8 +601,7 @@ dev_stack_prepare() {
   local dev_abs="${1:-environments/dev}"
   recover_eks_cluster_before_apply "${dev_abs}"
   upgrade_eks_authentication_mode_if_needed
-  import_aws_auth_configmap_if_needed "${dev_abs}"
-  apply_aws_auth_configmap_target "${dev_abs}"
+  cleanup_stale_eks_auth_state "${dev_abs}"
   delete_failed_eks_node_groups "${dev_abs}"
 }
 
@@ -704,14 +661,7 @@ import_existing_dev_resources() {
     fi
   fi
 
-  if aws eks describe-access-entry \
-    --cluster-name "${cluster_name}" \
-    --principal-arn "${node_role_arn}" \
-    --region "${AWS_REGION}" &>/dev/null; then
-    import_if_missing module.eks.aws_eks_access_entry.node "${cluster_name}:${node_role_arn}" true
-  fi
-
-  import_if_missing 'module.eks.kubernetes_config_map_v1.aws_auth[0]' 'kube-system/aws-auth' true
+  import_if_missing "module.eks.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
 
   if aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
@@ -721,24 +671,6 @@ import_existing_dev_resources() {
       "module.eks.aws_eks_node_group.main[\"${nodegroup_name}\"]" \
       "${cluster_name}:${nodegroup_name}" \
       true
-  fi
-
-  if aws eks describe-nodegroup \
-    --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" \
-    --region "${AWS_REGION}" &>/dev/null; then
-    local launch_template_id
-    launch_template_id="$(aws eks describe-nodegroup \
-      --cluster-name "${cluster_name}" \
-      --nodegroup-name "${nodegroup_name}" \
-      --query 'nodegroup.launchTemplate.id' \
-      --output text 2>/dev/null || true)"
-    if [ -n "${launch_template_id}" ] && [ "${launch_template_id}" != "None" ]; then
-      import_if_missing \
-        "module.eks.aws_launch_template.node_group[\"${nodegroup_name}\"]" \
-        "${launch_template_id}" \
-        true
-    fi
   fi
 
   popd >/dev/null

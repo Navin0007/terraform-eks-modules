@@ -28,6 +28,12 @@ variable "vpc_cni_role_arn" {
   type        = string
 }
 
+variable "install_vpc_cni_addon" {
+  description = "Create the vpc-cni add-on in this module. Set false when module.eks already installed vpc-cni before node groups."
+  type        = bool
+  default     = true
+}
+
 variable "ebs_csi_role_arn" {
   description = "IRSA role ARN for the aws-ebs-csi-driver add-on from the IAM module irsa_role_arns map."
   type        = string

@@ -114,32 +114,6 @@ variable "public_access_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
-variable "manage_aws_auth_configmap" {
-  description = "Manage the kube-system aws-auth ConfigMap (required for managed nodes when authentication mode is API_AND_CONFIG_MAP)."
-  type        = bool
-  default     = true
-}
-
-variable "aws_auth_map_roles" {
-  description = "Additional mapRoles entries for the aws-auth ConfigMap (node role is added automatically)."
-  type = list(object({
-    rolearn  = string
-    username = string
-    groups   = list(string)
-  }))
-  default = []
-}
-
-variable "aws_auth_map_users" {
-  description = "mapUsers entries for the aws-auth ConfigMap."
-  type = list(object({
-    userarn  = string
-    username = string
-    groups   = list(string)
-  }))
-  default = []
-}
-
 variable "node_groups" {
   description = "Managed node groups keyed by group name."
   type = map(object({

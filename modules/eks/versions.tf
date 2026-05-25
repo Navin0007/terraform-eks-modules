@@ -14,10 +14,5 @@ terraform {
       source  = "hashicorp/null"
       version = "~> 3.2"
     }
-    kubernetes = {
-      source                = "hashicorp/kubernetes"
-      version               = "~> 2.27"
-      configuration_aliases = [kubernetes]
-    }
   }
 }
