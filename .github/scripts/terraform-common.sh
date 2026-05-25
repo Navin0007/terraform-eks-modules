@@ -2,6 +2,20 @@
 # Shared helpers for Terraform in GitHub Actions and local use.
 set -euo pipefail
 
+repo_root() {
+  printf '%s\n' "${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+}
+
+# Resolve environments/dev to an absolute path (safe after pushd into dev).
+resolve_dev_dir() {
+  local dev_dir="${1:-environments/dev}"
+  if [[ "${dev_dir}" = /* ]]; then
+    printf '%s\n' "${dev_dir}"
+  else
+    printf '%s\n' "$(repo_root)/${dev_dir}"
+  fi
+}
+
 tf_common_vars() {
   : "${TF_PROJECT_NAME:?Set TF_PROJECT_NAME}"
   : "${TF_ENVIRONMENT:?Set TF_ENVIRONMENT}"
@@ -56,7 +70,7 @@ eks_cluster_exists_in_aws() {
 
 eks_cluster_in_state() {
   local cluster_addr="${1:-module.eks.aws_eks_cluster.main}"
-  terraform state list -no-color 2>/dev/null | grep -Fxq "${cluster_addr}"
+  terraform state show -no-color "${cluster_addr}" &>/dev/null
 }
 
 # True when terraform plan wants to create or replace the EKS cluster (replace triggers CreateCluster → 409).
@@ -79,76 +93,67 @@ eks_cluster_plan_wants_recreate() {
   return 1
 }
 
-# Import or re-import the cluster when AWS has it but Terraform plans to create it.
+# Import or verify the cluster when AWS has it but Terraform plans to create it.
 recover_eks_cluster_before_apply() {
-  local dev_dir="${1:-environments/dev}"
+  local dev_abs="${1:-environments/dev}"
   local cluster_name cluster_addr
-  local import_status=0
+  local did_pushd=false
 
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
-  tf_init_s3_backend "${dev_dir}" dev/terraform.tfstate
+  tf_init_s3_backend "${dev_abs}" dev/terraform.tfstate
   cluster_name="$(eks_cluster_name)"
   cluster_addr="module.eks.aws_eks_cluster.main"
 
-  pushd "${dev_dir}" >/dev/null
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
 
   if ! eks_cluster_exists_in_aws "${cluster_name}"; then
     echo "EKS cluster ${cluster_name} not in AWS; apply will create it."
-    popd >/dev/null
+    [ "${did_pushd}" = true ] && popd >/dev/null
     return 0
   fi
 
-  if eks_cluster_in_state "${cluster_addr}" && ! eks_cluster_plan_wants_recreate "${cluster_addr}"; then
+  if ! eks_cluster_in_state "${cluster_addr}"; then
+    echo "${cluster_addr} missing from state but cluster exists in AWS; importing."
+    if ! ensure_eks_cluster_imported "${dev_abs}"; then
+      dev_import_diagnostics "${dev_abs}"
+      [ "${did_pushd}" = true ] && popd >/dev/null
+      return 1
+    fi
+  elif ! eks_cluster_plan_wants_recreate "${cluster_addr}"; then
     echo "${cluster_addr} is in state and plan does not recreate it; OK to apply."
-    popd >/dev/null
+    [ "${did_pushd}" = true ] && popd >/dev/null
     return 0
-  fi
-
-  if eks_cluster_in_state "${cluster_addr}" && eks_cluster_plan_wants_recreate "${cluster_addr}"; then
+  else
     echo "::error::${cluster_addr} is in state but plan wants to create/replace the cluster (config drift)."
     echo "::error::Common causes: access_config authentication_mode change or cluster version mismatch."
     echo "::error::This module omits access_config by default on imports. Pull latest main and re-run apply."
     terraform plan -input=false -no-color || true
-    popd >/dev/null
-    return 1
-  fi
-
-  if eks_cluster_in_state "${cluster_addr}"; then
-    echo "::warning::${cluster_addr} is in state but plan wants recreate; re-importing."
-    terraform state rm -input=false "${cluster_addr}" || true
-  else
-    echo "${cluster_addr} missing from state but cluster exists in AWS; importing."
-  fi
-
-  echo "==> terraform import -target=${cluster_addr} ${cluster_addr} ${cluster_name}"
-  set +e
-  terraform import -input=false -target="${cluster_addr}" "${cluster_addr}" "${cluster_name}"
-  import_status=$?
-  set -e
-
-  if [ "${import_status}" -ne 0 ]; then
-    echo "::error::terraform import failed with status ${import_status}"
-    dev_import_diagnostics "${dev_dir}"
-    popd >/dev/null
+    [ "${did_pushd}" = true ] && popd >/dev/null
     return 1
   fi
 
   if eks_cluster_plan_wants_recreate "${cluster_addr}"; then
     echo "::error::Plan still wants to create/replace ${cluster_addr} after import."
     terraform plan -input=false -no-color || true
-    popd >/dev/null
+    [ "${did_pushd}" = true ] && popd >/dev/null
     return 1
   fi
 
   echo "Cluster recovered in state; safe to apply."
-  popd >/dev/null
+  [ "${did_pushd}" = true ] && popd >/dev/null
 }
 
 # Print context when debugging import/state issues in CI.
 dev_import_diagnostics() {
-  local dev_dir="${1:-environments/dev}"
+  local dev_abs="${1:-environments/dev}"
   local cluster_name
+  local did_pushd=false
 
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
   cluster_name="$(eks_cluster_name)"
 
@@ -160,6 +165,7 @@ dev_import_diagnostics() {
   echo "TF_BACKEND_BUCKET=${TF_BACKEND_BUCKET}"
   echo "Expected cluster: ${cluster_name}"
   echo "State key: dev/terraform.tfstate"
+  echo "Dev directory: ${dev_abs}"
   aws sts get-caller-identity
   if eks_cluster_exists_in_aws "${cluster_name}"; then
     echo "AWS: cluster EXISTS (describe-cluster OK)"
@@ -167,7 +173,10 @@ dev_import_diagnostics() {
     echo "AWS: cluster NOT FOUND (describe-cluster failed)"
   fi
 
-  pushd "${dev_dir}" >/dev/null
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
   if terraform state show -no-color module.eks.aws_eks_cluster.main &>/dev/null; then
     echo "Terraform state: module.eks.aws_eks_cluster.main is present"
   else
@@ -175,7 +184,7 @@ dev_import_diagnostics() {
   fi
   echo "EKS-related state addresses:"
   terraform state list -no-color 2>/dev/null | grep -E 'module\.eks|eks_cluster' || echo "(none)"
-  popd >/dev/null
+  [ "${did_pushd}" = true ] && popd >/dev/null
 }
 
 tf_backend_config_args() {
@@ -351,18 +360,20 @@ import_existing_bootstrap_resources() {
 
 # Import the EKS cluster into state when it already exists in AWS (required before apply).
 ensure_eks_cluster_imported() {
-  local dev_dir="${1:-environments/dev}"
-  local dev_abs did_pushd=false
+  local dev_abs="${1:-environments/dev}"
+  local did_pushd=false
   local cluster_name cluster_addr
+  local import_out import_status
 
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
   cluster_name="$(eks_cluster_name)"
   cluster_addr="module.eks.aws_eks_cluster.main"
 
-  dev_abs="$(cd "${dev_dir}" 2>/dev/null && pwd)" || {
-    echo "::error::Dev directory not found: ${dev_dir}"
+  if [ ! -d "${dev_abs}" ]; then
+    echo "::error::Dev directory not found: ${dev_abs}"
     return 1
-  }
+  fi
 
   if [ "$(pwd)" != "${dev_abs}" ]; then
     pushd "${dev_abs}" >/dev/null
@@ -388,44 +399,57 @@ ensure_eks_cluster_imported() {
   fi
 
   echo "Importing existing EKS cluster ${cluster_name} into Terraform state..."
-  if terraform import -input=false "${cluster_addr}" "${cluster_name}"; then
+  set +e
+  import_out="$(terraform import -input=false "${cluster_addr}" "${cluster_name}" 2>&1)"
+  import_status=$?
+  set -e
+  echo "${import_out}"
+
+  if [ "${import_status}" -eq 0 ]; then
     terraform state show -no-color "${cluster_addr}" >/dev/null
     echo "Successfully imported ${cluster_addr}."
-    if [ "${did_pushd}" = true ]; then
-      popd >/dev/null
-    fi
+    [ "${did_pushd}" = true ] && popd >/dev/null
+    return 0
+  fi
+
+  if echo "${import_out}" | grep -q "Resource already managed by Terraform"; then
+    echo "${cluster_addr} is already in Terraform state; continuing."
+    [ "${did_pushd}" = true ] && popd >/dev/null
     return 0
   fi
 
   echo "::error::Cluster ${cluster_name} exists in AWS but Terraform import failed (see output above)."
-  if [ "${did_pushd}" = true ]; then
-    popd >/dev/null
-  fi
+  [ "${did_pushd}" = true ] && popd >/dev/null
   return 1
 }
 
 # Abort apply when the cluster exists in AWS but is still missing from state.
 verify_eks_cluster_state() {
-  local dev_dir="${1:-environments/dev}"
+  local dev_abs="${1:-environments/dev}"
   local cluster_name cluster_addr
+  local did_pushd=false
 
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
   cluster_name="$(eks_cluster_name)"
   cluster_addr="module.eks.aws_eks_cluster.main"
 
-  pushd "${dev_dir}" >/dev/null
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
 
   if eks_cluster_exists_in_aws "${cluster_name}"; then
     if terraform state show -no-color "${cluster_addr}" &>/dev/null; then
       echo "Verified: ${cluster_name} is in AWS and Terraform state."
     else
       echo "::error::${cluster_name} exists in AWS but is not in Terraform state. Re-run import or run: terraform import ${cluster_addr} ${cluster_name}"
-      popd >/dev/null
+      [ "${did_pushd}" = true ] && popd >/dev/null
       return 1
     fi
   fi
 
-  popd >/dev/null
+  [ "${did_pushd}" = true ] && popd >/dev/null
 }
 
 # Explicit EKS cluster import for CI recovery (remove after state is healthy).
@@ -450,7 +474,8 @@ upgrade_eks_authentication_mode_if_needed() {
 
 # Delete node groups stuck in CREATE_FAILED so the next apply can recreate them.
 delete_failed_eks_node_groups() {
-  local dev_dir="${1:-environments/dev}"
+  local dev_abs="${1:-environments/dev}"
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
   local cluster_name nodegroup_name status
   cluster_name="$(eks_cluster_name)"
@@ -481,8 +506,8 @@ delete_failed_eks_node_groups() {
         --cluster-name "${cluster_name}" \
         --nodegroup-name "${nodegroup_name}" \
         --region "${AWS_REGION}"
-      if [ -d "${dev_dir}/.terraform" ]; then
-        pushd "${dev_dir}" >/dev/null
+      if [ -d "${dev_abs}/.terraform" ]; then
+        pushd "${dev_abs}" >/dev/null
         terraform state rm 'module.eks.aws_eks_node_group.main["general"]' 2>/dev/null || true
         popd >/dev/null
       fi
@@ -506,7 +531,8 @@ dev_stack_prepare() {
 
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
 import_existing_dev_resources() {
-  local dev_dir="${1:-environments/dev}"
+  local dev_abs="${1:-environments/dev}"
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
 
   local cluster_name
@@ -515,7 +541,7 @@ import_existing_dev_resources() {
   local log_group_name="/aws/eks/${cluster_name}/cluster"
   local nodegroup_name="general"
 
-  pushd "${dev_dir}" >/dev/null
+  pushd "${dev_abs}" >/dev/null
   mapfile -t var_args < <(tf_var_args)
   mapfile -t dev_args < <(tf_dev_extra_var_args)
 
