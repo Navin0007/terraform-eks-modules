@@ -142,9 +142,9 @@ module "addons" {
   vpc_cni_role_arn = module.iam_irsa.irsa_role_arns["vpc-cni"]
   ebs_csi_role_arn = module.iam_irsa.irsa_role_arns["ebs-csi"]
   # vpc-cni is installed in module.eks before the node group joins.
-  install_vpc_cni_addon    = false
-  nodes_ready_dependency   = module.eks.nodes_joined
-  tags                     = local.common_tags
+  install_vpc_cni_addon  = false
+  nodes_ready_dependency = module.eks.nodes_joined
+  tags                   = local.common_tags
 
   depends_on = [
     module.iam_irsa,
