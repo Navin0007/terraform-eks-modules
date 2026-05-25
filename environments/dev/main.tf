@@ -96,8 +96,8 @@ module "eks" {
 
   endpoint_private_access = true
   # Public endpoint required so CI/Terraform can apply the aws-auth ConfigMap (nodes still use the private endpoint).
-  endpoint_public_access  = true
-  public_access_cidrs     = ["0.0.0.0/0"]
+  endpoint_public_access = true
+  public_access_cidrs    = ["0.0.0.0/0"]
 
   tags = local.common_tags
 
