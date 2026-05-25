@@ -575,12 +575,77 @@ import_aws_auth_configmap_if_needed() {
   return 0
 }
 
+# Apply aws-auth alone so mapRoles is updated before the node group is created.
+apply_aws_auth_configmap_target() {
+  local dev_abs="${1:-environments/dev}"
+  local did_pushd=false
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+
+  if ! eks_cluster_exists_in_aws "$(eks_cluster_name)"; then
+    return 0
+  fi
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t dev_args < <(tf_dev_extra_var_args)
+
+  echo "Applying aws-auth ConfigMap (targeted) before node group..."
+  terraform apply -input=false -auto-approve -no-color \
+    "${var_args[@]}" "${dev_args[@]}" \
+    -target='module.eks.kubernetes_config_map_v1.aws_auth[0]'
+
+  [ "${did_pushd}" = true ] && popd >/dev/null
+}
+
+# Print node join hints when a node group is CREATE_FAILED.
+diagnose_node_join_failure() {
+  tf_export_dev_vars
+  local cluster_name="${1:-$(eks_cluster_name)}"
+  local nodegroup_name="${2:-general}"
+
+  echo "=== Node join diagnostics (${cluster_name}/${nodegroup_name}) ==="
+  aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.{status:status,health:health,resources:resources}' \
+    --output json 2>/dev/null || true
+
+  local instance_ids
+  instance_ids="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.resources.autoScalingGroups[0].name' \
+    --output text 2>/dev/null || true)"
+
+  if [ -n "${instance_ids}" ] && [ "${instance_ids}" != "None" ]; then
+    aws autoscaling describe-auto-scaling-groups \
+      --auto-scaling-group-names "${instance_ids}" \
+      --query 'AutoScalingGroups[0].Instances[*].InstanceId' \
+      --output text 2>/dev/null | tr '\t' '\n' | while read -r iid; do
+        [ -z "${iid}" ] && continue
+        echo "--- console output: ${iid} (last 40 lines) ---"
+        aws ec2 get-console-output --instance-id "${iid}" --region "${AWS_REGION}" \
+          --query 'Output' --output text 2>/dev/null | tail -40 || true
+      done
+  fi
+}
+
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).
 dev_stack_prepare() {
-  recover_eks_cluster_before_apply "${1:-environments/dev}"
+  local dev_abs="${1:-environments/dev}"
+  recover_eks_cluster_before_apply "${dev_abs}"
   upgrade_eks_authentication_mode_if_needed
-  import_aws_auth_configmap_if_needed "${1:-environments/dev}"
-  delete_failed_eks_node_groups "${1:-environments/dev}"
+  import_aws_auth_configmap_if_needed "${dev_abs}"
+  apply_aws_auth_configmap_target "${dev_abs}"
+  delete_failed_eks_node_groups "${dev_abs}"
 }
 
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
@@ -658,8 +723,23 @@ import_existing_dev_resources() {
       true
   fi
 
-  # Launch templates were removed; drop stale state so apply does not reference them.
-  terraform state rm 'module.eks.aws_launch_template.node_group["general"]' 2>/dev/null || true
+  if aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    local launch_template_id
+    launch_template_id="$(aws eks describe-nodegroup \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --query 'nodegroup.launchTemplate.id' \
+      --output text 2>/dev/null || true)"
+    if [ -n "${launch_template_id}" ] && [ "${launch_template_id}" != "None" ]; then
+      import_if_missing \
+        "module.eks.aws_launch_template.node_group[\"${nodegroup_name}\"]" \
+        "${launch_template_id}" \
+        true
+    fi
+  fi
 
   popd >/dev/null
 }

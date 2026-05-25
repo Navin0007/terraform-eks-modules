@@ -1,3 +1,33 @@
+# Minimal launch template: IMDS hop limit for AL2023/nodeadm only (no custom SGs or AMI).
+resource "aws_launch_template" "node_group" {
+  for_each = var.node_groups
+
+  name_prefix = "${local.cluster_name}-${each.key}-"
+  description = "EKS managed node group ${each.key} (IMDS settings only)"
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+    instance_metadata_tags      = "enabled"
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.common_tags, {
+      Name = "${local.cluster_name}-${each.key}"
+    })
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.cluster_name}-${each.key}-lt"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 resource "aws_eks_node_group" "main" {
   for_each = var.node_groups
 
@@ -21,6 +51,11 @@ resource "aws_eks_node_group" "main" {
       value  = taint.value.value
       effect = taint.value.effect
     }
+  }
+
+  launch_template {
+    id      = aws_launch_template.node_group[each.key].id
+    version = aws_launch_template.node_group[each.key].latest_version
   }
 
   scaling_config {

@@ -280,5 +280,8 @@ jobs:
           dev_stack_prepare environments/dev
           dev_import_diagnostics environments/dev
           pushd environments/dev >/dev/null
-          terraform apply -input=false -auto-approve -no-color
+          if ! terraform apply -input=false -auto-approve -no-color; then
+            diagnose_node_join_failure
+            exit 1
+          fi
           popd >/dev/null

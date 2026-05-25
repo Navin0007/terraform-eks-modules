@@ -1,19 +1,22 @@
-# API_AND_CONFIG_MAP still requires aws-auth mapRoles for managed node groups to join.
-# See: https://repost.aws/questions/QUjHDhoRS_TiujGNIQ4FEECA/eks-access-entry-for-managed-nodes-existing-but-mng-nodes-cannot-join-the-eks-cluster
+# API_AND_CONFIG_MAP requires aws-auth mapRoles for managed node groups (in addition to access entries).
 locals {
+  node_role_map_entry = {
+    rolearn  = var.node_role_arn
+    username = "system:node:{{EC2PrivateDNSName}}"
+    groups   = ["system:bootstrappers", "system:nodes"]
+  }
+
   aws_auth_additional_map_roles = [
     for entry in var.aws_auth_map_roles : entry if entry.rolearn != var.node_role_arn
   ]
-  aws_auth_map_roles = concat(
+
+  aws_auth_merged_map_roles = concat(
     local.aws_auth_additional_map_roles,
-    [
-      {
-        rolearn  = var.node_role_arn
-        username = "system:node:{{EC2PrivateDNSName}}"
-        groups   = ["system:bootstrappers", "system:nodes"]
-      },
-    ],
+    [local.node_role_map_entry],
   )
+
+  aws_auth_map_roles_yaml = trimspace(yamlencode(local.aws_auth_merged_map_roles))
+  aws_auth_map_users_yaml = trimspace(yamlencode(var.aws_auth_map_users))
 }
 
 resource "kubernetes_config_map_v1" "aws_auth" {
@@ -26,8 +29,8 @@ resource "kubernetes_config_map_v1" "aws_auth" {
   }
 
   data = {
-    mapRoles = yamlencode(local.aws_auth_map_roles)
-    mapUsers = yamlencode(var.aws_auth_map_users)
+    mapRoles = local.aws_auth_map_roles_yaml
+    mapUsers = local.aws_auth_map_users_yaml
   }
 
   depends_on = [
