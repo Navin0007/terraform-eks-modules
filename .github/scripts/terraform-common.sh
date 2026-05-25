@@ -589,30 +589,7 @@ node_iam_role_arn() {
     --output text
 }
 
-# EC2_LINUX entries are for self-managed nodes; they break managed node group auth in API_AND_CONFIG_MAP.
-remove_stale_node_access_entry() {
-  tf_export_dev_vars
-  local cluster_name node_role_arn
-  cluster_name="$(eks_cluster_name)"
-  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
-
-  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
-    return 0
-  fi
-
-  if aws eks describe-access-entry \
-    --cluster-name "${cluster_name}" \
-    --principal-arn "${node_role_arn}" \
-    --region "${AWS_REGION}" &>/dev/null; then
-    echo "Deleting stale EC2_LINUX access entry for managed node role ${node_role_arn}..."
-    aws eks delete-access-entry \
-      --cluster-name "${cluster_name}" \
-      --principal-arn "${node_role_arn}" \
-      --region "${AWS_REGION}"
-  fi
-}
-
-apply_aws_auth_node_role_merge() {
+ensure_node_cluster_auth_for_dev() {
   tf_export_dev_vars
   local cluster_name node_role_arn repo_root
   cluster_name="$(eks_cluster_name)"
@@ -624,17 +601,42 @@ apply_aws_auth_node_role_merge() {
   node_role_arn="$(node_iam_role_arn "${cluster_name}")"
   repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
-  echo "Merging node role into aws-auth mapRoles (${node_role_arn})..."
+  python3 -c "import yaml" 2>/dev/null || pip install --user pyyaml
+
+  echo "Ensuring node cluster auth for ${node_role_arn}..."
   CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
-    bash "${repo_root}/modules/eks/scripts/apply-aws-auth-node-role.sh"
+    bash "${repo_root}/modules/eks/scripts/ensure-node-cluster-auth.sh"
 
   aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null
-  if ! kubectl get configmap aws-auth -n kube-system -o yaml | grep -Fq "${node_role_arn}"; then
-    echo "::error::Node role ${node_role_arn} not found in aws-auth mapRoles after merge."
-    return 1
-  fi
+  local auth_mode
+  auth_mode="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.accessConfig.authenticationMode' \
+    --output text)"
 
-  echo "aws-auth mapRoles contains node role."
+  case "${auth_mode}" in
+    API)
+      if ! aws eks describe-access-entry \
+        --cluster-name "${cluster_name}" \
+        --principal-arn "${node_role_arn}" \
+        --region "${AWS_REGION}" &>/dev/null; then
+        echo "::error::Node access entry missing for API mode cluster."
+        return 1
+      fi
+      echo "Node access entry present (API mode)."
+      ;;
+    *)
+      echo "--- aws-auth mapRoles after ensure ---"
+      kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null || true
+      echo ""
+      if ! kubectl get configmap aws-auth -n kube-system -o yaml | grep -Fq "${node_role_arn}"; then
+        echo "::error::Node role ${node_role_arn} not found in aws-auth mapRoles."
+        return 1
+      fi
+      echo "aws-auth mapRoles contains node role."
+      ;;
+  esac
 }
 
 apply_aws_auth_node_role_target() {
@@ -648,7 +650,7 @@ apply_aws_auth_node_role_target() {
     return 0
   fi
 
-  apply_aws_auth_node_role_merge
+  ensure_node_cluster_auth_for_dev
 
   if [ "$(pwd)" != "${dev_abs}" ]; then
     pushd "${dev_abs}" >/dev/null
@@ -724,6 +726,21 @@ diagnose_node_join_failure() {
           --filters "Key=InstanceIds,Values=${iid}" \
           --query 'InstanceInformationList[0].PingStatus' \
           --output text 2>/dev/null | grep -q Online; then
+          echo "--- instance IAM role (metadata): ${iid} ---"
+          aws ssm send-command \
+            --instance-ids "${iid}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["ROLE=$(curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null | head -1); echo role=$ROLE; curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/$ROLE 2>/dev/null | head -5"]' \
+            --region "${AWS_REGION}" \
+            --output text --query 'Command.CommandId' 2>/dev/null | while read -r cmd_id; do
+              sleep 8
+              aws ssm get-command-invocation \
+                --command-id "${cmd_id}" \
+                --instance-id "${iid}" \
+                --region "${AWS_REGION}" \
+                --query 'StandardOutputContent' \
+                --output text 2>/dev/null || true
+            done
           echo "--- kubelet journal: ${iid} (last 40 lines) ---"
           aws ssm send-command \
             --instance-ids "${iid}" \
@@ -751,7 +768,6 @@ dev_stack_prepare() {
   upgrade_eks_authentication_mode_if_needed
   cleanup_stale_eks_auth_state "${dev_abs}"
   apply_eks_public_endpoint_if_needed "${dev_abs}"
-  remove_stale_node_access_entry
   apply_aws_auth_node_role_target "${dev_abs}"
   delete_failed_eks_node_groups "${dev_abs}"
 }
