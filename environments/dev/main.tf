@@ -99,6 +99,8 @@ module "eks" {
   endpoint_public_access = true
   public_access_cidrs    = ["0.0.0.0/0"]
 
+  create_node_access_entry = true
+
   tags = local.common_tags
 
   depends_on = [

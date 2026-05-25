@@ -1,4 +1,4 @@
-# Optional; primary node auth for API_AND_CONFIG_MAP is aws-auth mapRoles (see aws_auth.tf).
+# Primary node auth for API_AND_CONFIG_MAP; aws-auth mapRoles is a fallback (see aws_auth.tf).
 resource "aws_eks_access_entry" "node" {
   count = var.create_node_access_entry ? 1 : 0
 

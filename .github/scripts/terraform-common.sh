@@ -539,6 +539,115 @@ cleanup_stale_eks_auth_state() {
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
 
+apply_eks_public_endpoint_if_needed() {
+  local dev_abs="${1:-environments/dev}"
+  local cluster_name did_pushd=false
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+  cluster_name="$(eks_cluster_name)"
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    return 0
+  fi
+
+  local public_access
+  public_access="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.resourcesVpcConfig.endpointPublicAccess' \
+    --output text 2>/dev/null || echo "False")"
+
+  if [ "${public_access}" = "True" ]; then
+    echo "EKS public API endpoint is already enabled."
+    return 0
+  fi
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t dev_args < <(tf_dev_extra_var_args)
+
+  echo "Enabling public EKS API endpoint (targeted) so CI can apply aws-auth..."
+  terraform apply -input=false -auto-approve -no-color \
+    "${var_args[@]}" "${dev_args[@]}" \
+    -target='module.eks.aws_eks_cluster.main'
+
+  [ "${did_pushd}" = true ] && popd >/dev/null
+}
+
+ensure_node_eks_access_entry() {
+  tf_export_dev_vars
+  local cluster_name node_role_arn auth_mode
+  cluster_name="$(eks_cluster_name)"
+  node_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node"
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    return 0
+  fi
+
+  auth_mode="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.accessConfig.authenticationMode' \
+    --output text 2>/dev/null || echo "CONFIG_MAP")"
+
+  case "${auth_mode}" in
+    API | API_AND_CONFIG_MAP) ;;
+    *)
+      echo "Authentication mode is ${auth_mode}; node access entry requires API or API_AND_CONFIG_MAP."
+      return 0
+      ;;
+  esac
+
+  if aws eks describe-access-entry \
+    --cluster-name "${cluster_name}" \
+    --principal-arn "${node_role_arn}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    echo "Node EC2_LINUX access entry already exists for ${node_role_arn}."
+    return 0
+  fi
+
+  echo "Creating EC2_LINUX access entry for node role (AWS API)..."
+  aws eks create-access-entry \
+    --cluster-name "${cluster_name}" \
+    --principal-arn "${node_role_arn}" \
+    --type EC2_LINUX \
+    --region "${AWS_REGION}"
+}
+
+apply_eks_node_access_entry_target() {
+  local dev_abs="${1:-environments/dev}"
+  local did_pushd=false
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+
+  if ! eks_cluster_exists_in_aws "$(eks_cluster_name)"; then
+    return 0
+  fi
+
+  ensure_node_eks_access_entry
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t dev_args < <(tf_dev_extra_var_args)
+
+  echo "Applying node EC2_LINUX access entry (targeted) before node group..."
+  terraform apply -input=false -auto-approve -no-color \
+    "${var_args[@]}" "${dev_args[@]}" \
+    -target='module.eks.aws_eks_access_entry.node[0]'
+
+  [ "${did_pushd}" = true ] && popd >/dev/null
+}
+
 import_aws_auth_configmap_if_needed() {
   local dev_abs="${1:-environments/dev}"
   local addr='module.eks.kubernetes_config_map_v1.aws_auth[0]'
@@ -616,8 +725,9 @@ apply_aws_auth_configmap_target() {
 
   echo "Verifying aws-auth contains node role..."
   aws eks update-kubeconfig --name "$(eks_cluster_name)" --region "${AWS_REGION}" >/dev/null
-  kubectl get configmap aws-auth -n kube-system -o yaml | grep -F "${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-eks-node" \
-    || echo "::warning::Node role not found in aws-auth after apply; check mapRoles"
+  if ! kubectl get configmap aws-auth -n kube-system -o yaml | grep -F "${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-eks-node"; then
+    echo "::warning::Node role not found in aws-auth after apply; EC2_LINUX access entry may still authorize nodes."
+  fi
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
@@ -629,6 +739,25 @@ diagnose_node_join_failure() {
   local nodegroup_name="${2:-general}"
 
   echo "=== Node join diagnostics (${cluster_name}/${nodegroup_name}) ==="
+  aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.{authMode:accessConfig.authenticationMode,publicEndpoint:resourcesVpcConfig.endpointPublicAccess}' \
+    --output json 2>/dev/null || true
+
+  local node_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node"
+  echo "--- access entries for node role ---"
+  aws eks list-access-entries \
+    --cluster-name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --output text 2>/dev/null | tr '\t' '\n' | grep -F "${node_role_arn}" || echo "(node role not in access entries)"
+
+  aws eks describe-access-entry \
+    --cluster-name "${cluster_name}" \
+    --principal-arn "${node_role_arn}" \
+    --region "${AWS_REGION}" \
+    --output json 2>/dev/null || echo "(no EC2_LINUX access entry for node role)"
+
   aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
     --nodegroup-name "${nodegroup_name}" \
@@ -683,6 +812,8 @@ dev_stack_prepare() {
   recover_eks_cluster_before_apply "${dev_abs}"
   upgrade_eks_authentication_mode_if_needed
   cleanup_stale_eks_auth_state "${dev_abs}"
+  apply_eks_public_endpoint_if_needed "${dev_abs}"
+  apply_eks_node_access_entry_target "${dev_abs}"
   import_aws_auth_configmap_if_needed "${dev_abs}"
   apply_aws_auth_configmap_target "${dev_abs}"
   delete_failed_eks_node_groups "${dev_abs}"
@@ -745,6 +876,15 @@ import_existing_dev_resources() {
   fi
 
   import_if_missing "module.eks.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
+  if aws eks describe-access-entry \
+    --cluster-name "${cluster_name}" \
+    --principal-arn "${node_role_arn}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    import_if_missing \
+      'module.eks.aws_eks_access_entry.node[0]' \
+      "${cluster_name}:${node_role_arn}" \
+      true
+  fi
   import_if_missing 'module.eks.kubernetes_config_map_v1.aws_auth[0]' 'kube-system/aws-auth' true
 
   if aws eks describe-nodegroup \

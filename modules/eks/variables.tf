@@ -121,9 +121,14 @@ variable "manage_aws_auth_configmap" {
 }
 
 variable "create_node_access_entry" {
-  description = "Create an EC2_LINUX EKS access entry for the node role (optional if aws-auth mapRoles is correct)."
+  description = "Create an EC2_LINUX EKS access entry for the node role (required for API/API_AND_CONFIG_MAP node join)."
   type        = bool
-  default     = false
+  default     = true
+
+  validation {
+    condition     = length(var.node_groups) == 0 || var.create_node_access_entry
+    error_message = "create_node_access_entry must be true when node_groups are configured."
+  }
 }
 
 variable "node_groups" {
