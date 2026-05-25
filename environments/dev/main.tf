@@ -71,6 +71,10 @@ module "sg" {
 module "eks" {
   source = "../../modules/eks"
 
+  providers = {
+    kubernetes = kubernetes.eks
+  }
+
   project_name    = var.project_name
   environment     = var.environment
   cluster_name    = local.cluster_name
@@ -91,7 +95,9 @@ module "eks" {
   node_groups = var.node_groups
 
   endpoint_private_access = true
-  endpoint_public_access  = false
+  # Public endpoint required so CI/Terraform can apply the aws-auth ConfigMap (nodes still use the private endpoint).
+  endpoint_public_access  = true
+  public_access_cidrs     = ["0.0.0.0/0"]
 
   tags = local.common_tags
 

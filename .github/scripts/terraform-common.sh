@@ -574,20 +574,10 @@ import_existing_dev_resources() {
       "module.eks.aws_eks_node_group.main[\"${nodegroup_name}\"]" \
       "${cluster_name}:${nodegroup_name}" \
       true
-
-    local launch_template_id
-    launch_template_id="$(aws eks describe-nodegroup \
-      --cluster-name "${cluster_name}" \
-      --nodegroup-name "${nodegroup_name}" \
-      --query 'nodegroup.launchTemplate.id' \
-      --output text)"
-    if [ -n "${launch_template_id}" ] && [ "${launch_template_id}" != "None" ]; then
-      import_if_missing \
-        "module.eks.aws_launch_template.node_group[\"${nodegroup_name}\"]" \
-        "${launch_template_id}" \
-        true
-    fi
   fi
+
+  # Launch templates were removed; drop stale state so apply does not reference them.
+  terraform state rm 'module.eks.aws_launch_template.node_group["general"]' 2>/dev/null || true
 
   popd >/dev/null
 }

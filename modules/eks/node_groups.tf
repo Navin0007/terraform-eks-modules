@@ -1,58 +1,3 @@
-resource "aws_launch_template" "node_group" {
-  for_each = var.node_groups
-
-  name_prefix = "${local.cluster_name}-${each.key}-"
-  description = "Launch template for ${local.cluster_name} node group ${each.key}"
-
-  block_device_mappings {
-    device_name = "/dev/xvda"
-
-    ebs {
-      volume_size           = each.value.disk_size_gb
-      volume_type           = "gp3"
-      encrypted             = true
-      kms_key_id            = var.kms_key_arn
-      delete_on_termination = true
-    }
-  }
-
-  metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 2
-    instance_metadata_tags      = "enabled"
-  }
-
-  # Do not set security groups here — EKS attaches the cluster security group and merges AL2023 bootstrap user data.
-  # Custom SGs in launch templates block that behavior and break node join on private clusters.
-
-  tag_specifications {
-    resource_type = "instance"
-
-    tags = merge(local.common_tags, {
-      Name = "${local.cluster_name}-${each.key}"
-    })
-  }
-
-  tag_specifications {
-    resource_type = "volume"
-    tags          = local.common_tags
-  }
-
-  tag_specifications {
-    resource_type = "network-interface"
-    tags          = local.common_tags
-  }
-
-  tags = merge(local.common_tags, {
-    Name = "${local.cluster_name}-${each.key}-lt"
-  })
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
 resource "aws_eks_node_group" "main" {
   for_each = var.node_groups
 
@@ -64,6 +9,7 @@ resource "aws_eks_node_group" "main" {
   ami_type       = each.value.ami_type
   capacity_type  = each.value.capacity_type
   instance_types = each.value.instance_types
+  disk_size      = each.value.disk_size_gb
 
   labels = each.value.labels
 
@@ -75,11 +21,6 @@ resource "aws_eks_node_group" "main" {
       value  = taint.value.value
       effect = taint.value.effect
     }
-  }
-
-  launch_template {
-    id      = aws_launch_template.node_group[each.key].id
-    version = aws_launch_template.node_group[each.key].latest_version
   }
 
   scaling_config {
@@ -103,6 +44,7 @@ resource "aws_eks_node_group" "main" {
   depends_on = [
     aws_eks_cluster.main,
     aws_eks_access_entry.node,
+    kubernetes_config_map_v1.aws_auth,
     aws_vpc_security_group_ingress_rule.control_plane_from_cluster_sg_https,
     aws_vpc_security_group_egress_rule.control_plane_to_cluster_sg_kubelet,
   ]
