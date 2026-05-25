@@ -8,8 +8,15 @@ resource "aws_eks_addon" "coredns" {
 
   tags = local.common_tags
 
+  timeouts {
+    create = "45m"
+    update = "45m"
+  }
+
   depends_on = [
     terraform_data.cluster_dependency,
     data.aws_eks_cluster.main,
+    terraform_data.nodes_ready,
+    aws_eks_addon.kube_proxy,
   ]
 }

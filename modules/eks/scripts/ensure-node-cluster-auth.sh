@@ -20,7 +20,7 @@ ensure_node_cluster_auth() {
 
   case "${auth_mode}" in
     API)
-      echo "API mode: ensuring STANDARD access entry for node role..."
+      echo "API mode: ensuring EC2_LINUX access entry for node role..."
       if ! aws eks describe-access-entry \
         --cluster-name "${cluster_name}" \
         --principal-arn "${node_role_arn}" \
@@ -28,9 +28,7 @@ ensure_node_cluster_auth() {
         aws eks create-access-entry \
           --cluster-name "${cluster_name}" \
           --principal-arn "${node_role_arn}" \
-          --type STANDARD \
-          --username "system:node:{{EC2PrivateDNSName}}" \
-          --kubernetes-groups system:bootstrappers system:nodes \
+          --type EC2_LINUX \
           --region "${region}"
       fi
       ;;

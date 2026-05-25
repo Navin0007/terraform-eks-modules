@@ -126,7 +126,7 @@ variable "manage_aws_auth_configmap" {
 }
 
 variable "create_node_access_entry" {
-  description = "Create an EC2_LINUX access entry (self-managed nodes only; leave false for managed node groups)."
+  description = "Create an EC2_LINUX access entry for the node IAM role (required when authentication_mode is API)."
   type        = bool
   default     = false
 }

@@ -18,6 +18,12 @@ variable "cluster_id" {
   type        = string
 }
 
+variable "nodes_ready_dependency" {
+  description = "EKS module nodes_joined output; add-ons wait until nodes are Ready before install."
+  type        = string
+  default     = ""
+}
+
 variable "cluster_version" {
   description = "Kubernetes version running on the EKS control plane from the EKS module output."
   type        = string

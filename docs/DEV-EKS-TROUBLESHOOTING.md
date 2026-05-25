@@ -268,6 +268,62 @@ Line numbers refer to current `main` and may shift as the repo evolves.
 
 ---
 
+## Issue 16: CoreDNS / EBS CSI add-ons DEGRADED (20m timeout)
+
+**Symptoms**
+
+- `waiting for EKS Add-On ... create: timeout ... last state: 'DEGRADED'`
+- Terraform warning: re-apply will **remove and recreate** add-on configuration
+- Kubelet still logs `Unauthorized` on the node
+
+**Cause**
+
+1. **Root cause:** managed nodes never reach **Ready**, so system add-on pods cannot schedule; AWS reports add-ons as **DEGRADED**.
+2. **Apply order:** `module.addons` ran even when node join failed; Terraform only waited for the node group **ACTIVE**, not **Ready**.
+3. **Replace warning:** add-ons already existed in the cluster but were not in Terraform state (no import).
+
+**Fix (in repo)**
+
+| Change | File |
+|--------|------|
+| Post-scale access-entry delete + `aws-auth` refresh + wait for Ready nodes | `modules/eks/scripts/wait-for-ready-nodes.sh` |
+| Fallback: migrate `API_AND_CONFIG_MAP` → **API** + **EC2_LINUX** access entry | `modules/eks/scripts/migrate-cluster-auth-to-api.sh` |
+| Fail node group step before add-ons if join fails | `modules/eks/scripts/after-nodegroup-auth.sh` |
+| Gate add-ons on `module.eks.nodes_joined` | `modules/eks/outputs.tf`, `modules/addons/nodes_ready.tf`, `environments/dev/main.tf` |
+| Install order: kube-proxy → coredns / ebs-csi; 45m timeouts | `modules/addons/main.tf`, `coredns.tf` |
+| Import existing add-ons in CI | `.github/scripts/terraform-common.sh` |
+
+**After fix:** push and re-run the dev **apply** workflow. Add-ons should install only after at least one node is **Ready**.
+
+---
+
+## Issue 17: Perfect aws-auth but still Unauthorized (API_AND_CONFIG_MAP)
+
+**Symptoms (your latest diagnostics)**
+
+- `authMode`: `API_AND_CONFIG_MAP`
+- No access entry for node role
+- `aws-auth` `mapRoles` correct for `my-project-dev-eks-node`
+- Node group ACTIVE, `launchTemplate: null`, IAM profile present, IMDS role correct
+- Kubelet still `Unable to register node with API server: Unauthorized` for 1+ hour
+
+**Cause**
+
+In `API_AND_CONFIG_MAP`, the **API authentication path is evaluated before** the `aws-auth` ConfigMap. When no valid access entry exists for the node principal, the API path can return **Unauthorized without falling through to `aws-auth`**, even when `mapRoles` is correct.
+
+**Fix**
+
+| Step | What |
+|------|------|
+| 1 | CI migrates dev cluster `API_AND_CONFIG_MAP` → **API** (`migrate-cluster-auth-to-api.sh`) |
+| 2 | Create **EC2_LINUX** access entry for the node IAM role (not STANDARD) |
+| 3 | **Recycle** existing node instances (`recycle-nodegroup-instances.sh`) so kubelets re-auth |
+| 4 | `create_node_access_entry = true` in `environments/dev/main.tf` |
+
+Prepare order: `upgrade_eks_authentication_mode_if_needed` → `migrate_dev_cluster_to_api_node_auth` → apply.
+
+---
+
 ## Symptom → first place to look
 
 | Symptom | First reference |
@@ -277,5 +333,7 @@ Line numbers refer to current `main` and may shift as the repo evolves.
 | Access entry mode error | `upgrade-eks-authentication-mode.sh` L22–28 |
 | Policy on EC2_LINUX entry | `modules/eks/access.tf` L1–10 |
 | Join / SG (not Unauthorized) | `cluster_security_group_rules.tf` L6–31 |
-| **Kubelet Unauthorized** | `apply-aws-auth-node-role.sh`, `terraform-common.sh` L592–757 |
+| **Kubelet Unauthorized** | `after-nodegroup-auth.sh`, `wait-for-ready-nodes.sh`, `migrate-cluster-auth-to-api.sh` |
+| Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
+| Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
 | Stale failed node group | `terraform-common.sh` L476–522 |

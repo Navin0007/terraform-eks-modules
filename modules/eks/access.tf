@@ -1,4 +1,4 @@
-# EC2_LINUX access entries are for self-managed nodes only. Managed node groups use aws-auth.
+# EC2_LINUX access entry for node IAM role when authentication_mode is API (managed node groups).
 resource "aws_eks_access_entry" "node" {
   count = var.create_node_access_entry ? 1 : 0
 

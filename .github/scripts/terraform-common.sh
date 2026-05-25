@@ -472,6 +472,50 @@ upgrade_eks_authentication_mode_if_needed() {
     bash "${repo_root}/modules/eks/scripts/upgrade-eks-authentication-mode.sh"
 }
 
+# API_AND_CONFIG_MAP + aws-auth still yields Unauthorized on managed nodes; use API + EC2_LINUX.
+migrate_dev_cluster_to_api_node_auth() {
+  tf_export_dev_vars
+  local cluster_name node_role_arn repo_root auth_mode
+  cluster_name="$(eks_cluster_name)"
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    return 0
+  fi
+
+  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
+  repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+  auth_mode="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.accessConfig.authenticationMode' \
+    --output text)"
+
+  case "${auth_mode}" in
+    API)
+      echo "Cluster auth mode is API; ensuring EC2_LINUX access entry..."
+      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+        bash "${repo_root}/modules/eks/scripts/ensure-node-cluster-auth.sh"
+      ;;
+    API_AND_CONFIG_MAP)
+      echo "Migrating dev cluster from API_AND_CONFIG_MAP to API (managed nodes use EC2_LINUX access entries)..."
+      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+        bash "${repo_root}/modules/eks/scripts/migrate-cluster-auth-to-api.sh"
+      ;;
+    CONFIG_MAP)
+      echo "Cluster still CONFIG_MAP; upgrade step must run before API migration."
+      return 0
+      ;;
+    *)
+      echo "::warning::Unknown authentication mode ${auth_mode}; skipping API migration."
+      return 0
+      ;;
+  esac
+
+  CLUSTER_NAME="${cluster_name}" NODEGROUP_NAME="general" AWS_REGION="${AWS_REGION}" \
+    bash "${repo_root}/modules/eks/scripts/recycle-nodegroup-instances.sh" || true
+}
+
 # Delete managed node groups that still use a custom launch template or instances without an IAM profile.
 reset_stale_eks_managed_nodegroup() {
   tf_export_dev_vars
@@ -781,7 +825,14 @@ diagnose_node_join_failure() {
 
   local node_role_arn
   node_role_arn="$(node_iam_role_arn "${cluster_name}" 2>/dev/null || echo "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node")"
-  echo "--- access entry for node role (should be absent for API_AND_CONFIG_MAP managed nodes) ---"
+  local auth_mode
+  auth_mode="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.accessConfig.authenticationMode' \
+    --output text 2>/dev/null || echo "unknown")"
+
+  echo "--- access entry for node role (required for API mode; must be absent for API_AND_CONFIG_MAP) ---"
   if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
@@ -791,15 +842,23 @@ diagnose_node_join_failure() {
       --principal-arn "${node_role_arn}" \
       --region "${AWS_REGION}" \
       --output json 2>/dev/null || true
-    echo "::error::Node access entry still present — API auth may block aws-auth (causes Unauthorized)."
+    if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
+      echo "::error::Node access entry present in API_AND_CONFIG_MAP — API auth is tried first and often causes Unauthorized."
+    fi
   else
-    echo "(no access entry for node role — expected)"
+    if [ "${auth_mode}" = "API" ]; then
+      echo "::error::Node access entry missing — API mode requires EC2_LINUX entry for the node role."
+    else
+      echo "(no access entry for node role — expected for API_AND_CONFIG_MAP + aws-auth)"
+    fi
   fi
 
-  echo "--- aws-auth mapRoles (node role should appear here) ---"
-  aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
-  kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null \
-    || echo "(could not read aws-auth)"
+  if [ "${auth_mode}" != "API" ]; then
+    echo "--- aws-auth mapRoles (node role should appear here) ---"
+    aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+    kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null \
+      || echo "(could not read aws-auth)"
+  fi
 
   aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
@@ -880,6 +939,7 @@ dev_stack_prepare() {
   local dev_abs="${1:-environments/dev}"
   recover_eks_cluster_before_apply "${dev_abs}"
   upgrade_eks_authentication_mode_if_needed
+  migrate_dev_cluster_to_api_node_auth
   cleanup_stale_eks_auth_state "${dev_abs}"
   apply_eks_public_endpoint_if_needed "${dev_abs}"
   reset_stale_eks_managed_nodegroup
@@ -944,6 +1004,28 @@ import_existing_dev_resources() {
   fi
 
   import_if_missing "module.eks.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
+
+  if aws eks describe-access-entry \
+    --cluster-name "${cluster_name}" \
+    --principal-arn "${node_role_arn}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    import_if_missing "module.eks.aws_eks_access_entry.node[0]" "${cluster_name}:${node_role_arn}" true
+  fi
+
+  local addon_name addon_addr
+  for addon_name in kube-proxy coredns aws-ebs-csi-driver; do
+    case "${addon_name}" in
+      kube-proxy) addon_addr="module.addons.aws_eks_addon.kube_proxy" ;;
+      coredns) addon_addr="module.addons.aws_eks_addon.coredns" ;;
+      aws-ebs-csi-driver) addon_addr="module.addons.aws_eks_addon.aws_ebs_csi_driver" ;;
+    esac
+    if aws eks describe-addon \
+      --cluster-name "${cluster_name}" \
+      --addon-name "${addon_name}" \
+      --region "${AWS_REGION}" &>/dev/null; then
+      import_if_missing "${addon_addr}" "${cluster_name}:${addon_name}" true
+    fi
+  done
 
   if aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
