@@ -1,25 +1,20 @@
-# API_AND_CONFIG_MAP: kubelet auth uses aws-auth mapRoles (Unauthorized without this entry).
-locals {
-  aws_auth_map_roles = <<-YAML
-    - rolearn: ${var.node_role_arn}
-      username: system:node:{{EC2PrivateDNSName}}
-      groups:
-        - system:bootstrappers
-        - system:nodes
-  YAML
-}
+# Managed node groups in API_AND_CONFIG_MAP use aws-auth mapRoles (not EC2_LINUX access entries).
+resource "null_resource" "aws_auth_node_role" {
+  count = var.manage_aws_auth_configmap ? 1 : 0
 
-resource "kubernetes_config_map_v1" "aws_auth" {
-  provider = kubernetes
-  count    = var.manage_aws_auth_configmap ? 1 : 0
-
-  metadata {
-    name      = "aws-auth"
-    namespace = "kube-system"
+  triggers = {
+    cluster_name  = aws_eks_cluster.main.name
+    node_role_arn = var.node_role_arn
+    region        = var.region
   }
 
-  data = {
-    mapRoles = trimspace(local.aws_auth_map_roles)
+  provisioner "local-exec" {
+    command = "bash ${path.module}/scripts/apply-aws-auth-node-role.sh"
+    environment = {
+      CLUSTER_NAME  = aws_eks_cluster.main.name
+      NODE_ROLE_ARN = var.node_role_arn
+      AWS_REGION    = var.region
+    }
   }
 
   depends_on = [

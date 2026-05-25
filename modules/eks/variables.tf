@@ -115,20 +115,20 @@ variable "public_access_cidrs" {
 }
 
 variable "manage_aws_auth_configmap" {
-  description = "Manage kube-system/aws-auth mapRoles for the node IAM role (required for API_AND_CONFIG_MAP node join)."
-  type        = bool
-  default     = true
-}
-
-variable "create_node_access_entry" {
-  description = "Create an EC2_LINUX EKS access entry for the node role (required for API/API_AND_CONFIG_MAP node join)."
+  description = "Merge the node IAM role into kube-system/aws-auth mapRoles (required for managed node groups)."
   type        = bool
   default     = true
 
   validation {
-    condition     = length(var.node_groups) == 0 || var.create_node_access_entry
-    error_message = "create_node_access_entry must be true when node_groups are configured."
+    condition     = length(var.node_groups) == 0 || var.manage_aws_auth_configmap
+    error_message = "manage_aws_auth_configmap must be true when node_groups are configured."
   }
+}
+
+variable "create_node_access_entry" {
+  description = "Create an EC2_LINUX access entry (self-managed nodes only; leave false for managed node groups)."
+  type        = bool
+  default     = false
 }
 
 variable "node_groups" {
