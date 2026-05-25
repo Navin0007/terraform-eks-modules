@@ -114,6 +114,18 @@ variable "public_access_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "manage_aws_auth_configmap" {
+  description = "Manage kube-system/aws-auth mapRoles for the node IAM role (required for API_AND_CONFIG_MAP node join)."
+  type        = bool
+  default     = true
+}
+
+variable "create_node_access_entry" {
+  description = "Create an EC2_LINUX EKS access entry for the node role (optional if aws-auth mapRoles is correct)."
+  type        = bool
+  default     = false
+}
+
 variable "node_groups" {
   description = "Managed node groups keyed by group name."
   type = map(object({

@@ -71,6 +71,10 @@ module "sg" {
 module "eks" {
   source = "../../modules/eks"
 
+  providers = {
+    kubernetes = kubernetes.eks
+  }
+
   project_name    = var.project_name
   environment     = var.environment
   cluster_name    = local.cluster_name

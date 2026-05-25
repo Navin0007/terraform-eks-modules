@@ -44,6 +44,7 @@ resource "aws_eks_node_group" "main" {
   depends_on = [
     aws_eks_cluster.main,
     aws_eks_addon.vpc_cni,
+    kubernetes_config_map_v1.aws_auth[0],
     aws_vpc_security_group_ingress_rule.control_plane_from_cluster_sg_https,
     aws_vpc_security_group_egress_rule.control_plane_to_cluster_sg_kubelet,
   ]

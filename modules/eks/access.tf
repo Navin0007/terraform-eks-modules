@@ -1,2 +1,10 @@
-# Managed node groups: EKS auto-updates aws-auth in API_AND_CONFIG_MAP mode on node group create.
-# Do not create a separate EC2_LINUX access entry here — it can conflict with that flow.
+# Optional; primary node auth for API_AND_CONFIG_MAP is aws-auth mapRoles (see aws_auth.tf).
+resource "aws_eks_access_entry" "node" {
+  count = var.create_node_access_entry ? 1 : 0
+
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = var.node_role_arn
+  type          = "EC2_LINUX"
+
+  depends_on = [null_resource.ensure_eks_authentication_mode]
+}
