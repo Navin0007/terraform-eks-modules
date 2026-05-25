@@ -72,6 +72,18 @@ resource "aws_iam_role" "node" {
   })
 }
 
+# EKS managed node groups use the node role; this profile supports recovery if AWS loses the auto-created profile.
+resource "aws_iam_instance_profile" "node" {
+  count = var.create_core_roles ? 1 : 0
+
+  name = "${var.cluster_name}-node-instance-profile"
+  role = aws_iam_role.node[0].name
+
+  tags = merge(local.common_tags, {
+    Name = "${var.cluster_name}-node-instance-profile"
+  })
+}
+
 resource "aws_iam_role_policy_attachment" "node_custom" {
   count = var.create_core_roles ? 1 : 0
 

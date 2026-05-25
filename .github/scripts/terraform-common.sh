@@ -472,6 +472,104 @@ upgrade_eks_authentication_mode_if_needed() {
     bash "${repo_root}/modules/eks/scripts/upgrade-eks-authentication-mode.sh"
 }
 
+# Delete managed node groups that still use a custom launch template or instances without an IAM profile.
+reset_stale_eks_managed_nodegroup() {
+  tf_export_dev_vars
+  local cluster_name nodegroup_name node_role_arn
+  local lt_id lt_name ng_role status asg_name need_delete
+  cluster_name="$(eks_cluster_name)"
+  nodegroup_name="general"
+  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
+
+  if ! aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    return 0
+  fi
+
+  lt_id="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.launchTemplate.id' \
+    --output text 2>/dev/null || echo "None")"
+  lt_name="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.launchTemplate.name' \
+    --output text 2>/dev/null || echo "None")"
+  ng_role="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.nodeRole' \
+    --output text 2>/dev/null || echo "")"
+  status="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.status' \
+    --output text)"
+
+  echo "Node group ${nodegroup_name}: status=${status} nodeRole=${ng_role} launchTemplate=${lt_name}/${lt_id}"
+
+  need_delete=false
+  if [ -n "${lt_id}" ] && [ "${lt_id}" != "None" ]; then
+    echo "::warning::Node group still uses custom launch template ${lt_name} (${lt_id}). EKS default templates attach the node instance profile; custom templates from older applies often do not."
+    need_delete=true
+  fi
+
+  if [ -n "${ng_role}" ] && [ "${ng_role}" != "${node_role_arn}" ]; then
+    echo "::warning::Node group nodeRole (${ng_role}) does not match expected (${node_role_arn})."
+    need_delete=true
+  fi
+
+  asg_name="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.resources.autoScalingGroups[0].name' \
+    --output text 2>/dev/null || true)"
+
+  if [ -n "${asg_name}" ] && [ "${asg_name}" != "None" ]; then
+    local iid profile_arn
+    while read -r iid; do
+      [ -z "${iid}" ] || [ "${iid}" = "None" ] && continue
+      profile_arn="$(aws ec2 describe-instances --instance-ids "${iid}" --region "${AWS_REGION}" \
+        --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' --output text 2>/dev/null || echo "None")"
+      echo "Instance ${iid} IamInstanceProfile=${profile_arn}"
+      if [ -z "${profile_arn}" ] || [ "${profile_arn}" = "None" ]; then
+        echo "::error::Instance ${iid} has no IAM instance profile (kubelet cannot authenticate)."
+        need_delete=true
+      fi
+    done < <(aws autoscaling describe-auto-scaling-groups \
+      --auto-scaling-group-names "${asg_name}" \
+      --query 'AutoScalingGroups[0].Instances[*].InstanceId' \
+      --output text 2>/dev/null | tr '\t' '\n')
+  fi
+
+  if [ "${need_delete}" = true ]; then
+    echo "Deleting node group ${nodegroup_name} for clean recreate without stale launch template..."
+    aws eks delete-nodegroup \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" || true
+    aws eks wait nodegroup-deleted \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" || true
+    if [ -d "environments/dev/.terraform" ] || [ -d "$(resolve_dev_dir environments/dev)/.terraform" ]; then
+      local dev_abs
+      dev_abs="$(resolve_dev_dir environments/dev)"
+      pushd "${dev_abs}" >/dev/null
+      terraform state rm 'module.eks.aws_eks_node_group.main["general"]' 2>/dev/null || true
+      popd >/dev/null
+    fi
+  fi
+}
+
 # Delete node groups stuck in CREATE_FAILED so the next apply can recreate them.
 delete_failed_eks_node_groups() {
   local dev_abs="${1:-environments/dev}"
@@ -698,7 +796,7 @@ diagnose_node_join_failure() {
     --cluster-name "${cluster_name}" \
     --nodegroup-name "${nodegroup_name}" \
     --region "${AWS_REGION}" \
-    --query 'nodegroup.{status:status,health:health,resources:resources}' \
+    --query 'nodegroup.{status:status,nodeRole:nodeRole,launchTemplate:launchTemplate,health:health,resources:resources}' \
     --output json 2>/dev/null || true
 
   local asg_name
@@ -715,10 +813,17 @@ diagnose_node_join_failure() {
       --query 'AutoScalingGroups[0].Instances[*].InstanceId' \
       --output text 2>/dev/null | tr '\t' '\n' | while read -r iid; do
         [ -z "${iid}" ] || [ "${iid}" = "None" ] && continue
-        echo "--- instance IAM profile: ${iid} ---"
-        aws ec2 describe-instances --instance-ids "${iid}" --region "${AWS_REGION}" \
-          --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' \
-          --output text 2>/dev/null || true
+        echo "--- instance IAM profile (EC2 API): ${iid} ---"
+        local profile_arn private_dns
+        profile_arn="$(aws ec2 describe-instances --instance-ids "${iid}" --region "${AWS_REGION}" \
+          --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' --output text 2>/dev/null || echo "None")"
+        private_dns="$(aws ec2 describe-instances --instance-ids "${iid}" --region "${AWS_REGION}" \
+          --query 'Reservations[0].Instances[0].PrivateDnsName' --output text 2>/dev/null || echo "None")"
+        echo "IamInstanceProfile=${profile_arn}"
+        echo "PrivateDnsName=${private_dns}"
+        if [ -z "${profile_arn}" ] || [ "${profile_arn}" = "None" ]; then
+          echo "::error::No IAM instance profile on instance — kubelet has no AWS credentials (shows as Unauthorized)."
+        fi
         echo "--- console output: ${iid} (last 80 lines) ---"
         aws ec2 get-console-output --instance-id "${iid}" --region "${AWS_REGION}" \
           --query 'Output' --output text 2>/dev/null | tail -80 || true
@@ -726,11 +831,11 @@ diagnose_node_join_failure() {
           --filters "Key=InstanceIds,Values=${iid}" \
           --query 'InstanceInformationList[0].PingStatus' \
           --output text 2>/dev/null | grep -q Online; then
-          echo "--- instance IAM role (metadata): ${iid} ---"
+          echo "--- instance IAM role (IMDSv2): ${iid} ---"
           aws ssm send-command \
             --instance-ids "${iid}" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["ROLE=$(curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null | head -1); echo role=$ROLE; curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/$ROLE 2>/dev/null | head -5"]' \
+            --parameters 'commands=["TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H \"X-aws-ec2-metadata-token-ttl-seconds: 60\"); ROLE=$(curl -s -H \"X-aws-ec2-metadata-token: $TOKEN\" http://169.254.169.254/latest/meta-data/iam/security-credentials/ | head -1); echo role=$ROLE"]' \
             --region "${AWS_REGION}" \
             --output text --query 'Command.CommandId' 2>/dev/null | while read -r cmd_id; do
               sleep 8
@@ -768,6 +873,7 @@ dev_stack_prepare() {
   upgrade_eks_authentication_mode_if_needed
   cleanup_stale_eks_auth_state "${dev_abs}"
   apply_eks_public_endpoint_if_needed "${dev_abs}"
+  reset_stale_eks_managed_nodegroup
   apply_aws_auth_node_role_target "${dev_abs}"
   delete_failed_eks_node_groups "${dev_abs}"
 }
