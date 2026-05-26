@@ -164,6 +164,13 @@ jobs:
           fi
           echo "Destroy confirmed."
 
+      - name: Repair remote state (destroy)
+        if: inputs.operation == 'destroy'
+        run: |
+          source .github/scripts/terraform-common.sh
+          export_bootstrap_backend_env global/bootstrap "${{ inputs.operation }}" "${{ inputs.target }}"
+          repair_remote_state_backend_for_destroy "global/bootstrap/terraform.tfstate"
+
       - name: Bootstrap init
         if: >-
           inputs.target == 'all' || inputs.target == 'global/bootstrap'
