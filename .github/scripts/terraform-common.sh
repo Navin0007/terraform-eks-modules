@@ -1104,20 +1104,68 @@ dev_stack_destroy_prep() {
   fi
 }
 
-# Empty remote state bucket so bootstrap destroy can remove the bucket (force_destroy=false).
-empty_terraform_state_bucket() {
-  tf_export_dev_vars
-  local bucket="${TF_BACKEND_BUCKET:-${TF_STATE_BUCKET:-}}"
-  if [ -z "${bucket}" ]; then
-    echo "::warning::State bucket unknown; skipping empty."
+bootstrap_destroy_var_args() {
+  printf '%s\n' "-var=state_bucket_force_destroy=true"
+}
+
+# Remove stale lock rows when S3 state was deleted but DynamoDB digests remain.
+clear_terraform_state_lock_table() {
+  tf_common_vars
+  local table="${TF_BACKEND_DYNAMODB_TABLE:-${TF_STATE_DYNAMODB_TABLE:-}}"
+  local lock_id
+
+  if [ -z "${table}" ]; then
+    table="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-locks"
+  fi
+
+  if ! aws dynamodb describe-table --table-name "${table}" --region "${AWS_REGION}" &>/dev/null; then
+    echo "Lock table ${table} does not exist."
     return 0
   fi
-  if ! aws s3api head-bucket --bucket "${bucket}" 2>/dev/null; then
-    echo "State bucket ${bucket} does not exist."
+
+  echo "Clearing Terraform state lock records in ${table}..."
+  while read -r lock_id; do
+    [ -z "${lock_id}" ] && continue
+    aws dynamodb delete-item \
+      --table-name "${table}" \
+      --region "${AWS_REGION}" \
+      --key "{\"LockID\":{\"S\":\"${lock_id}\"}}" \
+      --output text >/dev/null || true
+  done < <(aws dynamodb scan \
+    --table-name "${table}" \
+    --region "${AWS_REGION}" \
+    --projection-expression "LockID" \
+    --query 'Items[].LockID.S' \
+    --output text 2>/dev/null | tr '\t' '\n')
+}
+
+# After dev/policies destroy, drop their state objects so bootstrap can delete the bucket.
+remove_downstream_remote_state_keys() {
+  resolve_bootstrap_backend_env global/bootstrap || return 0
+  local bucket="${TF_BACKEND_BUCKET}"
+
+  if ! aws s3api head-bucket --bucket "${bucket}" --region "${AWS_REGION}" 2>/dev/null; then
     return 0
   fi
-  echo "Removing objects from state bucket ${bucket} (required before bootstrap destroy)..."
-  aws s3 rm "s3://${bucket}/" --recursive --region "${AWS_REGION}" || true
+
+  echo "Removing dev/policies state objects from ${bucket} (bootstrap state kept for destroy)..."
+  aws s3 rm "s3://${bucket}/dev/terraform.tfstate" --region "${AWS_REGION}" 2>/dev/null || true
+  aws s3 rm "s3://${bucket}/global/policies/terraform.tfstate" --region "${AWS_REGION}" 2>/dev/null || true
+  clear_terraform_state_lock_table
+}
+
+prepare_bootstrap_destroy() {
+  resolve_bootstrap_backend_env global/bootstrap
+  clear_terraform_state_lock_table
+  bootstrap_init global/bootstrap
+
+  if ! aws s3api head-object \
+    --bucket "${TF_BACKEND_BUCKET}" \
+    --key "global/bootstrap/terraform.tfstate" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    echo "::warning::Bootstrap state object missing in S3 (often after a partial destroy); importing AWS resources into state..."
+    import_existing_bootstrap_resources global/bootstrap
+  fi
 }
 
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).

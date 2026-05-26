@@ -311,17 +311,20 @@ jobs:
           mapfile -t var_args < <(tf_var_args)
           terraform destroy -input=false -auto-approve -no-color "${var_args[@]}"
 
-      - name: Empty state bucket (bootstrap destroy)
-        if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
+      - name: Remove dev/policies state from S3
+        if: inputs.operation == 'destroy' && inputs.target == 'all'
         run: |
           source .github/scripts/terraform-common.sh
-          empty_terraform_state_bucket
+          remove_downstream_remote_state_keys
 
       - name: Bootstrap destroy
         if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
         working-directory: global/bootstrap
         run: |
           source ../../.github/scripts/terraform-common.sh
+          prepare_bootstrap_destroy
           mapfile -t var_args < <(tf_var_args)
+          mapfile -t destroy_args < <(bootstrap_destroy_var_args)
           mapfile -t state_args < <(bootstrap_local_state_args)
-          terraform destroy -input=false -auto-approve -no-color "${state_args[@]}" "${var_args[@]}"
+          terraform destroy -input=false -auto-approve -no-color \
+            "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}"

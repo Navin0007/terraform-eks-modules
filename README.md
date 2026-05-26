@@ -35,6 +35,8 @@ module "eks" {
 | `destroy` | `all` | `environments/dev` → `global/policies` → `global/bootstrap` (reverse) |
 | `destroy` | `environments/dev` | EKS/VPC/dev only (keeps bootstrap + policies) |
 
-**Destroy:** set **operation** to `destroy`, type `destroy` in **confirm_destroy**, then run. Dev destroy scales down and deletes the node group first. Destroying bootstrap empties the remote state S3 bucket, then removes the bucket, lock table, and KMS key. Destroy/plan discover the state bucket from AWS if repository variables are not set (bootstrap must have been applied once).
+**Destroy:** set **operation** to `destroy`, type `destroy` in **confirm_destroy**, then run. Dev destroy scales down and deletes the node group first. Bootstrap destroy uses `state_bucket_force_destroy=true` so the state bucket can be removed with objects still inside. Destroy/plan discover the state bucket from AWS if repository variables are not set.
+
+If you see an S3/DynamoDB state checksum error after a failed destroy, re-run **destroy** with target `global/bootstrap` (or `all`); the workflow clears stale lock-table rows before bootstrap init.
 
 Requires OIDC (`AWS_ROLE_ARN` secret) and repository variables — see [bootstrap README](global/bootstrap/README.md#github-actions).

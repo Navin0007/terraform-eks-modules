@@ -22,3 +22,9 @@ variable "aws_account_id" {
     error_message = "aws_account_id must be a 12-digit AWS account ID."
   }
 }
+
+variable "state_bucket_force_destroy" {
+  description = "Allow Terraform to delete the state bucket even when it contains objects (use true only for teardown)."
+  type        = bool
+  default     = false
+}

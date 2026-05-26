@@ -101,7 +101,7 @@ resource "aws_kms_alias" "terraform_state" {
 
 resource "aws_s3_bucket" "terraform_state" {
   bucket        = local.state_bucket_name
-  force_destroy = false
+  force_destroy = var.state_bucket_force_destroy
 
   tags = {
     Name        = local.state_bucket_name
