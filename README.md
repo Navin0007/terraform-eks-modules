@@ -27,4 +27,14 @@ module "eks" {
 
 [`.github/workflows/terraform.yml`](.github/workflows/terraform.yml) runs `terraform fmt`, `validate`, and TFLint on pull requests and pushes to `main`.
 
-**Deploy via GitHub Actions:** Actions → Terraform → Run workflow → **operation** `plan` or `apply`, **target** `all` (runs `global/bootstrap` → `global/policies` → `environments/dev`). Requires OIDC (`AWS_ROLE_ARN` secret) and repository variables — see [bootstrap README](global/bootstrap/README.md#github-actions).
+**Deploy via GitHub Actions:** Actions → **Terraform** → Run workflow.
+
+| Operation | Target | Order |
+|-----------|--------|--------|
+| `plan` / `apply` | `all` | `global/bootstrap` → `global/policies` → `environments/dev` |
+| `destroy` | `all` | `environments/dev` → `global/policies` → `global/bootstrap` (reverse) |
+| `destroy` | `environments/dev` | EKS/VPC/dev only (keeps bootstrap + policies) |
+
+**Destroy:** set **operation** to `destroy`, type `destroy` in **confirm_destroy**, then run. Dev destroy scales down and deletes the node group first. Destroying bootstrap empties the remote state S3 bucket, then removes the bucket, lock table, and KMS key.
+
+Requires OIDC (`AWS_ROLE_ARN` secret) and repository variables — see [bootstrap README](global/bootstrap/README.md#github-actions).

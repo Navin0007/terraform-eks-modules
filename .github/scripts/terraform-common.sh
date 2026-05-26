@@ -994,6 +994,72 @@ diagnose_node_join_failure() {
   fi
 }
 
+# Scale down / delete node group before terraform destroy (faster, fewer timeouts).
+dev_stack_destroy_prep() {
+  tf_export_dev_vars
+  local cluster_name nodegroup_name status
+  cluster_name="$(eks_cluster_name)"
+  nodegroup_name="general"
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    echo "EKS cluster ${cluster_name} not found; skipping node group teardown."
+    return 0
+  fi
+
+  if ! aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    echo "Node group ${nodegroup_name} not found; skipping."
+    return 0
+  fi
+
+  status="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.status' \
+    --output text)"
+
+  echo "Node group ${nodegroup_name} status=${status}; scaling to 0..."
+  aws eks update-nodegroup-config \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --scaling-config "minSize=0,maxSize=0,desiredSize=0" 2>/dev/null || true
+
+  if aws eks wait nodegroup-active \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" 2>/dev/null; then
+    echo "Deleting node group ${nodegroup_name} before Terraform destroy..."
+    aws eks delete-nodegroup \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" || true
+    aws eks wait nodegroup-deleted \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" 2>/dev/null || true
+  fi
+}
+
+# Empty remote state bucket so bootstrap destroy can remove the bucket (force_destroy=false).
+empty_terraform_state_bucket() {
+  tf_export_dev_vars
+  local bucket="${TF_BACKEND_BUCKET:-${TF_STATE_BUCKET:-}}"
+  if [ -z "${bucket}" ]; then
+    echo "::warning::State bucket unknown; skipping empty."
+    return 0
+  fi
+  if ! aws s3api head-bucket --bucket "${bucket}" 2>/dev/null; then
+    echo "State bucket ${bucket} does not exist."
+    return 0
+  fi
+  echo "Removing objects from state bucket ${bucket} (required before bootstrap destroy)..."
+  aws s3 rm "s3://${bucket}/" --recursive --region "${AWS_REGION}" || true
+}
+
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).
 dev_stack_prepare() {
   local dev_abs="${1:-environments/dev}"

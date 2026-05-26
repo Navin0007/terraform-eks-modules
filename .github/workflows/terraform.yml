@@ -27,6 +27,11 @@ on:
         options:
           - plan
           - apply
+          - destroy
+      confirm_destroy:
+        description: "Type destroy to confirm (required when operation is destroy)"
+        type: string
+        default: ""
       target:
         description: "Stack to run (all runs bootstrap → policies → dev in order)"
         type: choice
@@ -119,11 +124,14 @@ jobs:
         run: tflint -f compact
 
   aws:
-    name: ${{ github.event.inputs.operation == 'apply' && 'Apply' || 'Plan' }} (${{ github.event.inputs.target }})
+    name: >-
+      ${{ github.event.inputs.operation == 'apply' && 'Apply'
+          || (github.event.inputs.operation == 'destroy' && 'Destroy' || 'Plan') }}
+      (${{ github.event.inputs.target }})
     needs: validate
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: ${{ github.event.inputs.operation == 'destroy' && 120 || 90 }}
     environment: ${{ vars.TF_ENVIRONMENT || 'dev' }}
     concurrency:
       group: terraform-${{ github.event.inputs.target }}-${{ vars.TF_ENVIRONMENT }}
@@ -146,6 +154,15 @@ jobs:
 
       - name: Load Terraform helpers
         run: chmod +x .github/scripts/terraform-common.sh
+
+      - name: Confirm destroy
+        if: inputs.operation == 'destroy'
+        run: |
+          if [ "${{ inputs.confirm_destroy }}" != "destroy" ]; then
+            echo "::error::Destroy requires typing destroy in the confirm_destroy field."
+            exit 1
+          fi
+          echo "Destroy confirmed."
 
       - name: Bootstrap init
         if: inputs.target == 'all' || inputs.target == 'global/bootstrap'
@@ -246,23 +263,39 @@ jobs:
           tf_init_s3_backend environments/dev dev/terraform.tfstate
 
       - name: Import existing dev resources
-        if: inputs.target == 'all' || inputs.target == 'environments/dev'
+        if: inputs.operation != 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
           import_existing_dev_resources environments/dev
 
       # TODO: Remove after my-project-dev-eks is in Terraform state (recovery from partial apply).
       - name: Import EKS cluster into state (recovery)
-        if: inputs.target == 'all' || inputs.target == 'environments/dev'
+        if: inputs.operation != 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
           import_eks_cluster_recovery environments/dev
 
       - name: Upgrade EKS authentication mode
-        if: inputs.target == 'all' || inputs.target == 'environments/dev'
+        if: inputs.operation != 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
           upgrade_eks_authentication_mode_if_needed
+
+      - name: Dev destroy prep
+        if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
+        run: |
+          source .github/scripts/terraform-common.sh
+          dev_stack_destroy_prep
+
+      - name: Dev destroy
+        if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
+        run: |
+          source .github/scripts/terraform-common.sh
+          pushd environments/dev >/dev/null
+          mapfile -t var_args < <(tf_var_args)
+          mapfile -t dev_args < <(tf_dev_extra_var_args)
+          terraform destroy -input=false -auto-approve -no-color "${var_args[@]}" "${dev_args[@]}"
+          popd >/dev/null
 
       - name: Dev plan
         if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'environments/dev')
@@ -285,3 +318,26 @@ jobs:
             exit 1
           fi
           popd >/dev/null
+
+      - name: Policies destroy
+        if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'global/policies')
+        working-directory: global/policies
+        run: |
+          source ../../.github/scripts/terraform-common.sh
+          mapfile -t var_args < <(tf_var_args)
+          terraform destroy -input=false -auto-approve -no-color "${var_args[@]}"
+
+      - name: Empty state bucket (bootstrap destroy)
+        if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
+        run: |
+          source .github/scripts/terraform-common.sh
+          empty_terraform_state_bucket
+
+      - name: Bootstrap destroy
+        if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
+        working-directory: global/bootstrap
+        run: |
+          source ../../.github/scripts/terraform-common.sh
+          mapfile -t var_args < <(tf_var_args)
+          mapfile -t state_args < <(bootstrap_local_state_args)
+          terraform destroy -input=false -auto-approve -no-color "${state_args[@]}" "${var_args[@]}"
