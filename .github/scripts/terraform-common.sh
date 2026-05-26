@@ -1108,14 +1108,76 @@ bootstrap_destroy_var_args() {
   printf '%s\n' "-var=state_bucket_force_destroy=true"
 }
 
-# Remove all lock/digest rows (fixes S3 empty vs DynamoDB checksum mismatch).
+terraform_state_lock_id() {
+  printf '%s/%s' "${1:?}" "${2:?}"
+}
+
+terraform_state_digest_lock_id() {
+  printf '%s/%s-md5' "${1:?}" "${2:?}"
+}
+
+delete_dynamodb_lock_id() {
+  local table="$1"
+  local lock_id="$2"
+  if aws dynamodb delete-item \
+    --table-name "${table}" \
+    --region "${AWS_REGION}" \
+    --key "{\"LockID\":{\"S\":\"${lock_id}\"}}" \
+    --return-values ALL_OLD \
+    --output json 2>/dev/null | grep -q LockID; then
+    echo "  deleted LockID=${lock_id}"
+    return 0
+  fi
+  return 1
+}
+
+# Terraform S3 backend stores digests at LockID "{bucket}/{key}-md5" (not found by generic scans on some IAM policies).
+delete_terraform_state_lock_records() {
+  local bucket="$1"
+  local state_key="$2"
+  local table="$3"
+  delete_dynamodb_lock_id "${table}" "$(terraform_state_lock_id "${bucket}" "${state_key}")" || true
+  delete_dynamodb_lock_id "${table}" "$(terraform_state_digest_lock_id "${bucket}" "${state_key}")" || true
+}
+
+# Write Digest in DynamoDB to match current S3 state object (fixes checksum mismatch after recovery).
+sync_terraform_state_digest_from_s3() {
+  local bucket="$1"
+  local state_key="$2"
+  local table="$3"
+  local lock_id digest tmp
+
+  if ! aws s3api head-object --bucket "${bucket}" --key "${state_key}" --region "${AWS_REGION}" &>/dev/null; then
+    echo "::warning::Cannot sync digest; s3://${bucket}/${state_key} missing."
+    return 1
+  fi
+
+  lock_id="$(terraform_state_digest_lock_id "${bucket}" "${state_key}")"
+  tmp="$(mktemp)"
+  aws s3 cp "s3://${bucket}/${state_key}" "${tmp}" --region "${AWS_REGION}" >/dev/null
+  digest="$(md5sum "${tmp}" | awk '{print $1}')"
+  rm -f "${tmp}"
+
+  aws dynamodb put-item \
+    --table-name "${table}" \
+    --region "${AWS_REGION}" \
+    --item "{\"LockID\":{\"S\":\"${lock_id}\"},\"Digest\":{\"S\":\"${digest}\"}}"
+
+  echo "Synced DynamoDB digest for ${lock_id} -> ${digest}"
+}
+
+# Remove lock/digest rows for all state keys used in this repo.
 clear_terraform_state_lock_table() {
   tf_common_vars
   local table="${TF_BACKEND_DYNAMODB_TABLE:-${TF_STATE_DYNAMODB_TABLE:-}}"
+  local bucket="${TF_BACKEND_BUCKET:-}"
   local lock_id deleted=0
 
   if [ -z "${table}" ]; then
     table="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-locks"
+  fi
+  if [ -z "${bucket}" ]; then
+    bucket="$(bootstrap_state_bucket_name)"
   fi
 
   if ! aws dynamodb describe-table --table-name "${table}" --region "${AWS_REGION}" &>/dev/null; then
@@ -1123,23 +1185,28 @@ clear_terraform_state_lock_table() {
     return 0
   fi
 
-  echo "Clearing all Terraform state lock/digest records in ${table}..."
+  echo "Deleting Terraform state lock/digest rows for ${bucket}..."
+  for state_key in \
+    "global/bootstrap/terraform.tfstate" \
+    "global/policies/terraform.tfstate" \
+    "dev/terraform.tfstate"; do
+    delete_terraform_state_lock_records "${bucket}" "${state_key}" "${table}"
+  done
+
+  echo "Scanning ${table} for remaining lock rows..."
   while read -r lock_id; do
     [ -z "${lock_id}" ] && continue
-    aws dynamodb delete-item \
-      --table-name "${table}" \
-      --region "${AWS_REGION}" \
-      --key "{\"LockID\":{\"S\":\"${lock_id}\"}}" \
-      --output text >/dev/null && deleted=$((deleted + 1)) || true
+    if delete_dynamodb_lock_id "${table}" "${lock_id}"; then
+      deleted=$((deleted + 1))
+    fi
   done < <(aws dynamodb scan \
     --table-name "${table}" \
     --region "${AWS_REGION}" \
     --projection-expression "LockID" \
-    --paginate \
     --query 'Items[].LockID.S' \
     --output text 2>/dev/null | tr '\t' '\n')
 
-  echo "Removed ${deleted} lock/digest record(s) from ${table}."
+  echo "Removed ${deleted} additional lock/digest record(s) from ${table}."
 }
 
 # After a bad empty-bucket step: restore minimal state object so init/destroy can proceed.
@@ -1172,9 +1239,13 @@ ensure_remote_state_object_exists() {
 # Run before any terraform init on destroy (checksum mismatch when S3 state was wiped).
 repair_remote_state_backend_for_destroy() {
   local state_key="${1:-global/bootstrap/terraform.tfstate}"
+  local table
+
   resolve_bootstrap_backend_env global/bootstrap
+  table="${TF_BACKEND_DYNAMODB_TABLE}"
   clear_terraform_state_lock_table
   ensure_remote_state_object_exists "${state_key}"
+  sync_terraform_state_digest_from_s3 "${TF_BACKEND_BUCKET}" "${state_key}" "${table}"
 }
 
 # After dev/policies destroy, drop their state objects so bootstrap can delete the bucket.
@@ -1189,7 +1260,8 @@ remove_downstream_remote_state_keys() {
   echo "Removing dev/policies state objects from ${bucket} (bootstrap state kept for destroy)..."
   aws s3 rm "s3://${bucket}/dev/terraform.tfstate" --region "${AWS_REGION}" 2>/dev/null || true
   aws s3 rm "s3://${bucket}/global/policies/terraform.tfstate" --region "${AWS_REGION}" 2>/dev/null || true
-  clear_terraform_state_lock_table
+  delete_terraform_state_lock_records "${bucket}" "dev/terraform.tfstate" "${TF_BACKEND_DYNAMODB_TABLE}"
+  delete_terraform_state_lock_records "${bucket}" "global/policies/terraform.tfstate" "${TF_BACKEND_DYNAMODB_TABLE}"
 }
 
 prepare_bootstrap_destroy() {
