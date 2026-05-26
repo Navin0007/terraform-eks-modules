@@ -165,7 +165,9 @@ jobs:
           echo "Destroy confirmed."
 
       - name: Bootstrap init
-        if: inputs.target == 'all' || inputs.target == 'global/bootstrap'
+        if: >-
+          inputs.target == 'all' || inputs.target == 'global/bootstrap'
+          || inputs.target == 'global/policies' || inputs.target == 'environments/dev'
         run: |
           source .github/scripts/terraform-common.sh
           bootstrap_init global/bootstrap
@@ -214,25 +216,7 @@ jobs:
         if: inputs.target == 'all' || inputs.target == 'global/policies' || inputs.target == 'environments/dev'
         run: |
           source .github/scripts/terraform-common.sh
-          if [ "${{ inputs.operation }}" = "apply" ] && { [ "${{ inputs.target }}" = "all" ] || [ "${{ inputs.target }}" = "global/bootstrap" ]; }; then
-            export_bootstrap_outputs global/bootstrap
-          elif [ -n "${TF_STATE_BUCKET:-}" ] && [ -n "${TF_STATE_KMS_KEY_ID:-}" ] && [ -n "${TF_STATE_DYNAMODB_TABLE:-}" ] && [ -n "${TF_STATE_KMS_KEY_ARN:-}" ]; then
-            export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
-            export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
-            export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
-            export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN}"
-            export TF_BACKEND_REGION="${AWS_REGION}"
-          else
-            echo "::error::Bootstrap remote state values are required. Either run apply for global/bootstrap (or all) in this workflow, or set repository variables TF_STATE_BUCKET, TF_STATE_KMS_KEY_ID, TF_STATE_DYNAMODB_TABLE, and TF_STATE_KMS_KEY_ARN from bootstrap outputs."
-            exit 1
-          fi
-          {
-            echo "TF_BACKEND_BUCKET=${TF_BACKEND_BUCKET}"
-            echo "TF_BACKEND_KMS_KEY_ID=${TF_BACKEND_KMS_KEY_ID}"
-            echo "TF_BACKEND_DYNAMODB_TABLE=${TF_BACKEND_DYNAMODB_TABLE}"
-            echo "TF_STATE_KMS_KEY_ARN=${TF_STATE_KMS_KEY_ARN}"
-            echo "TF_BACKEND_REGION=${TF_BACKEND_REGION}"
-          } >> "${GITHUB_ENV}"
+          export_bootstrap_backend_env global/bootstrap "${{ inputs.operation }}" "${{ inputs.target }}"
 
       - name: Policies init
         if: inputs.target == 'all' || inputs.target == 'global/policies'

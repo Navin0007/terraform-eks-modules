@@ -236,6 +236,66 @@ bootstrap_set_backend_from_aws() {
   local kms_alias="alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
   export TF_BACKEND_KMS_KEY_ID
   TF_BACKEND_KMS_KEY_ID="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
+  export TF_STATE_KMS_KEY_ARN
+  TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.Arn' --output text)"
+}
+
+# Resolve TF_BACKEND_* for plan/destroy when bootstrap was applied in a previous run.
+resolve_bootstrap_backend_env() {
+  local bootstrap_dir="${1:-global/bootstrap}"
+
+  if [ -n "${TF_STATE_BUCKET:-}" ] \
+    && [ -n "${TF_STATE_KMS_KEY_ID:-}" ] \
+    && [ -n "${TF_STATE_DYNAMODB_TABLE:-}" ] \
+    && [ -n "${TF_STATE_KMS_KEY_ARN:-}" ]; then
+    export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
+    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
+    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
+    export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN}"
+    export TF_BACKEND_REGION="${AWS_REGION}"
+    echo "Using bootstrap backend from repository variables."
+    return 0
+  fi
+
+  if bootstrap_state_bucket_exists; then
+    bootstrap_set_backend_from_aws
+    echo "Using bootstrap backend from existing S3 bucket and KMS alias in AWS."
+    return 0
+  fi
+
+  if [ -f "${bootstrap_dir}/terraform.tfstate" ]; then
+    bootstrap_init "${bootstrap_dir}"
+    export_bootstrap_outputs "${bootstrap_dir}"
+    echo "Using bootstrap outputs from local terraform.tfstate."
+    return 0
+  fi
+
+  echo "::error::Bootstrap remote state values are required." >&2
+  echo "::error::Set repository variables TF_STATE_BUCKET, TF_STATE_KMS_KEY_ID, TF_STATE_DYNAMODB_TABLE, TF_STATE_KMS_KEY_ARN," >&2
+  echo "::error::or run apply for global/bootstrap first." >&2
+  return 1
+}
+
+# Write TF_BACKEND_* to GITHUB_ENV (plan / destroy / apply after bootstrap).
+export_bootstrap_backend_env() {
+  local bootstrap_dir="${1:-global/bootstrap}"
+  local operation="${2:-}"
+  local target="${3:-}"
+
+  if [ "${operation}" = "apply" ] \
+    && { [ "${target}" = "all" ] || [ "${target}" = "global/bootstrap" ]; }; then
+    export_bootstrap_outputs "${bootstrap_dir}"
+  else
+    resolve_bootstrap_backend_env "${bootstrap_dir}"
+  fi
+
+  {
+    echo "TF_BACKEND_BUCKET=${TF_BACKEND_BUCKET}"
+    echo "TF_BACKEND_KMS_KEY_ID=${TF_BACKEND_KMS_KEY_ID}"
+    echo "TF_BACKEND_DYNAMODB_TABLE=${TF_BACKEND_DYNAMODB_TABLE}"
+    echo "TF_STATE_KMS_KEY_ARN=${TF_STATE_KMS_KEY_ARN}"
+    echo "TF_BACKEND_REGION=${TF_BACKEND_REGION}"
+  } >> "${GITHUB_ENV}"
 }
 
 export_bootstrap_outputs() {
