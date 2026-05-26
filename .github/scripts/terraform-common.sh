@@ -6,6 +6,20 @@ repo_root() {
   printf '%s\n' "${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 }
 
+# Resolve a repo-relative path (safe when the workflow uses working-directory).
+repo_path() {
+  local path="${1:?}"
+  if [[ "${path}" = /* ]]; then
+    printf '%s\n' "${path}"
+  else
+    printf '%s\n' "$(repo_root)/${path}"
+  fi
+}
+
+bootstrap_dir_abs() {
+  repo_path "${1:-global/bootstrap}"
+}
+
 # Resolve environments/dev to an absolute path (safe after pushd into dev).
 resolve_dev_dir() {
   local dev_dir="${1:-environments/dev}"
@@ -242,7 +256,8 @@ bootstrap_set_backend_from_aws() {
 
 # Resolve TF_BACKEND_* for plan/destroy when bootstrap was applied in a previous run.
 resolve_bootstrap_backend_env() {
-  local bootstrap_dir="${1:-global/bootstrap}"
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
 
   if [ -n "${TF_STATE_BUCKET:-}" ] \
     && [ -n "${TF_STATE_KMS_KEY_ID:-}" ] \
@@ -278,9 +293,10 @@ resolve_bootstrap_backend_env() {
 
 # Write TF_BACKEND_* to GITHUB_ENV (plan / destroy / apply after bootstrap).
 export_bootstrap_backend_env() {
-  local bootstrap_dir="${1:-global/bootstrap}"
-  local operation="${2:-}"
-  local target="${3:-}"
+  local bootstrap_dir operation target
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
+  operation="${2:-}"
+  target="${3:-}"
 
   if [ "${operation}" = "apply" ] \
     && { [ "${target}" = "all" ] || [ "${target}" = "global/bootstrap" ]; }; then
@@ -299,7 +315,8 @@ export_bootstrap_backend_env() {
 }
 
 export_bootstrap_outputs() {
-  local bootstrap_dir="${1:-global/bootstrap}"
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   pushd "${bootstrap_dir}" >/dev/null
   mapfile -t state_args < <(bootstrap_local_state_args)
 
@@ -317,8 +334,9 @@ export_bootstrap_outputs() {
 }
 
 tf_init_s3_backend() {
-  local dir="$1"
-  local state_key="$2"
+  local dir state_key
+  dir="$(repo_path "$1")"
+  state_key="$2"
   pushd "${dir}" >/dev/null
   export TF_BACKEND_KEY="${state_key}"
   mapfile -t backend_args < <(tf_backend_config_args)
@@ -327,7 +345,8 @@ tf_init_s3_backend() {
 }
 
 maybe_migrate_bootstrap_state() {
-  local bootstrap_dir="${1:-global/bootstrap}"
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
 
   if [ -n "${TF_STATE_BUCKET:-}" ]; then
     return 0
@@ -342,7 +361,8 @@ maybe_migrate_bootstrap_state() {
 }
 
 bootstrap_init() {
-  local bootstrap_dir="${1:-global/bootstrap}"
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   pushd "${bootstrap_dir}" >/dev/null
 
   if [ -n "${TF_STATE_BUCKET:-}" ]; then
@@ -369,7 +389,8 @@ bootstrap_init() {
 # Import bootstrap resources that already exist in AWS but are missing from state
 # (for example after a partial apply or lost local state before S3 migration).
 import_existing_bootstrap_resources() {
-  local bootstrap_dir="${1:-global/bootstrap}"
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   tf_common_vars
 
   local name_prefix="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}"
@@ -1214,7 +1235,7 @@ ensure_remote_state_object_exists() {
   local state_key="${1:?}"
   local bucket kms_arn
 
-  resolve_bootstrap_backend_env global/bootstrap
+  resolve_bootstrap_backend_env "$(bootstrap_dir_abs global/bootstrap)"
   bucket="${TF_BACKEND_BUCKET}"
   kms_arn="${TF_STATE_KMS_KEY_ARN}"
 
@@ -1238,19 +1259,27 @@ ensure_remote_state_object_exists() {
 
 # Run before any terraform init on destroy (checksum mismatch when S3 state was wiped).
 repair_remote_state_backend_for_destroy() {
-  local state_key="${1:-global/bootstrap/terraform.tfstate}"
-  local table
+  local table bucket state_key
 
-  resolve_bootstrap_backend_env global/bootstrap
+  resolve_bootstrap_backend_env "$(bootstrap_dir_abs global/bootstrap)"
   table="${TF_BACKEND_DYNAMODB_TABLE}"
+  bucket="${TF_BACKEND_BUCKET}"
   clear_terraform_state_lock_table
-  ensure_remote_state_object_exists "${state_key}"
-  sync_terraform_state_digest_from_s3 "${TF_BACKEND_BUCKET}" "${state_key}" "${table}"
+
+  for state_key in \
+    "global/bootstrap/terraform.tfstate" \
+    "global/policies/terraform.tfstate" \
+    "dev/terraform.tfstate"; do
+    ensure_remote_state_object_exists "${state_key}" || true
+    if aws s3api head-object --bucket "${bucket}" --key "${state_key}" --region "${AWS_REGION}" &>/dev/null; then
+      sync_terraform_state_digest_from_s3 "${bucket}" "${state_key}" "${table}" || true
+    fi
+  done
 }
 
 # After dev/policies destroy, drop their state objects so bootstrap can delete the bucket.
 remove_downstream_remote_state_keys() {
-  resolve_bootstrap_backend_env global/bootstrap || return 0
+  resolve_bootstrap_backend_env "$(bootstrap_dir_abs global/bootstrap)" || return 0
   local bucket="${TF_BACKEND_BUCKET}"
 
   if ! aws s3api head-bucket --bucket "${bucket}" --region "${AWS_REGION}" 2>/dev/null; then
@@ -1265,10 +1294,12 @@ remove_downstream_remote_state_keys() {
 }
 
 prepare_bootstrap_destroy() {
-  repair_remote_state_backend_for_destroy "global/bootstrap/terraform.tfstate"
-  bootstrap_init global/bootstrap
+  local bootstrap_abs
+  bootstrap_abs="$(bootstrap_dir_abs global/bootstrap)"
+  repair_remote_state_backend_for_destroy
+  bootstrap_init "${bootstrap_abs}"
   echo "Importing bootstrap resources into state (recovery after partial destroy)..."
-  import_existing_bootstrap_resources global/bootstrap
+  import_existing_bootstrap_resources "${bootstrap_abs}"
 }
 
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).

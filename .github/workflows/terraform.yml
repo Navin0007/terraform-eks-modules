@@ -169,7 +169,7 @@ jobs:
         run: |
           source .github/scripts/terraform-common.sh
           export_bootstrap_backend_env global/bootstrap "${{ inputs.operation }}" "${{ inputs.target }}"
-          repair_remote_state_backend_for_destroy "global/bootstrap/terraform.tfstate"
+          repair_remote_state_backend_for_destroy
 
       - name: Bootstrap init
         if: >-
@@ -326,12 +326,13 @@ jobs:
 
       - name: Bootstrap destroy
         if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
-        working-directory: global/bootstrap
         run: |
-          source ../../.github/scripts/terraform-common.sh
+          source .github/scripts/terraform-common.sh
           prepare_bootstrap_destroy
+          pushd global/bootstrap >/dev/null
           mapfile -t var_args < <(tf_var_args)
           mapfile -t destroy_args < <(bootstrap_destroy_var_args)
           mapfile -t state_args < <(bootstrap_local_state_args)
           terraform destroy -input=false -auto-approve -no-color \
             "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}"
+          popd >/dev/null
