@@ -1157,15 +1157,16 @@ ensure_remote_state_object_exists() {
   fi
 
   echo "Restoring placeholder state at s3://${bucket}/${state_key} (import will repopulate resources)..."
-  aws s3api put-object \
-    --bucket "${bucket}" \
-    --key "${state_key}" \
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' \
+    '{"version":4,"terraform_version":"1.7.5","serial":1,"lineage":"destroy-recovery","outputs":{},"resources":[]}' \
+    >"${tmp}"
+  aws s3 cp "${tmp}" "s3://${bucket}/${state_key}" \
     --region "${AWS_REGION}" \
-    --server-side-encryption aws:kms \
-    --ssekms-key-id "${kms_arn}" \
-    --body /dev/stdin <<'EOF'
-{"version":4,"terraform_version":"1.7.5","serial":1,"lineage":"destroy-recovery","outputs":{},"resources":[]}
-EOF
+    --sse aws:kms \
+    --sse-kms-key-id "${kms_arn}"
+  rm -f "${tmp}"
 }
 
 # Run before any terraform init on destroy (checksum mismatch when S3 state was wiped).
