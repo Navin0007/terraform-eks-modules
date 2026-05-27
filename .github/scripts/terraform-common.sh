@@ -248,11 +248,11 @@ bootstrap_uses_local_state() {
   [ -z "${TF_STATE_BUCKET:-}" ] && ! bootstrap_remote_backend_ready
 }
 
-# Emit -state=terraform.tfstate for plan/import/apply/output before S3 migration.
+# No extra CLI args: local state is established by bootstrap_init -backend=false.
+# Do not pass -state=terraform.tfstate; with backend "s3" in backend.tf that triggers
+# "Backend initialization required" on import/plan/apply in Terraform 1.7+.
 bootstrap_local_state_args() {
-  if bootstrap_uses_local_state; then
-    printf '%s\n' "-state=terraform.tfstate"
-  fi
+  :
 }
 
 bootstrap_set_backend_from_aws() {
@@ -420,6 +420,9 @@ import_existing_bootstrap_resources() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   tf_common_vars
+
+  # Each workflow step is a new shell; re-init so .terraform matches local vs remote backend.
+  bootstrap_init "${bootstrap_dir}"
 
   local name_prefix="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}"
   local state_bucket="${name_prefix}-terraform-state-${AWS_ACCOUNT_ID}"

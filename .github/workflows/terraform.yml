@@ -171,25 +171,23 @@ jobs:
           export_bootstrap_backend_env global/bootstrap "${{ inputs.operation }}" "${{ inputs.target }}"
           repair_remote_state_backend_for_destroy
 
-      - name: Bootstrap init
+      - name: Bootstrap init and import
         if: >-
           inputs.target == 'all' || inputs.target == 'global/bootstrap'
           || inputs.target == 'global/policies' || inputs.target == 'environments/dev'
         run: |
           source .github/scripts/terraform-common.sh
           bootstrap_init global/bootstrap
-
-      - name: Import existing bootstrap resources
-        if: inputs.target == 'all' || inputs.target == 'global/bootstrap'
-        run: |
-          source .github/scripts/terraform-common.sh
-          import_existing_bootstrap_resources global/bootstrap
+          if [ "${{ inputs.target }}" = "all" ] || [ "${{ inputs.target }}" = "global/bootstrap" ]; then
+            import_existing_bootstrap_resources global/bootstrap
+          fi
 
       - name: Bootstrap plan
         if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
         working-directory: global/bootstrap
         run: |
           source ../../.github/scripts/terraform-common.sh
+          bootstrap_init global/bootstrap
           mapfile -t var_args < <(tf_var_args)
           mapfile -t state_args < <(bootstrap_local_state_args)
           terraform plan -input=false -no-color "${state_args[@]}" "${var_args[@]}"
@@ -199,6 +197,7 @@ jobs:
         working-directory: global/bootstrap
         run: |
           source ../../.github/scripts/terraform-common.sh
+          bootstrap_init global/bootstrap
           mapfile -t var_args < <(tf_var_args)
           mapfile -t state_args < <(bootstrap_local_state_args)
           terraform apply -input=false -auto-approve -no-color "${state_args[@]}" "${var_args[@]}"
