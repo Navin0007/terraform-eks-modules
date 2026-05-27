@@ -219,7 +219,7 @@ tf_backend_config_args() {
   if bootstrap_dynamodb_table_exists "${lock_table}"; then
     printf '%s\n' "-backend-config=dynamodb_table=${lock_table}"
   else
-    echo "DynamoDB lock table ${lock_table} not found; Terraform state locking disabled for this run."
+    echo "DynamoDB lock table ${lock_table} not found; Terraform state locking disabled for this run." >&2
   fi
 }
 
@@ -338,9 +338,9 @@ bootstrap_set_backend_for_existing_bucket() {
     export TF_BACKEND_KMS_KEY_ID="${key_id}"
     export TF_STATE_KMS_KEY_ARN
     TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" --query 'KeyMetadata.Arn' --output text)"
-    echo "Using KMS key ${key_id} from existing state bucket encryption (no alias yet)."
+    echo "Using KMS key ${key_id} from existing state bucket encryption (no alias yet)." >&2
   else
-    echo "State bucket exists without SSE-KMS; S3 backend will use bucket default encryption for state."
+    echo "State bucket exists without SSE-KMS; S3 backend will use bucket default encryption for state." >&2
   fi
 }
 
