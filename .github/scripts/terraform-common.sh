@@ -335,17 +335,19 @@ bootstrap_resolve_kms_key_id() {
   bootstrap_kms_key_id_from_state_bucket
 }
 
-# Find bootstrap KMS keys scheduled for deletion when alias/bucket discovery fails.
-bootstrap_discover_pending_bootstrap_kms_key() {
-  local key_id state desc pending=0 found_id=""
+# Find bootstrap KMS keys that need recovery (PendingDeletion or Disabled).
+bootstrap_discover_unusable_bootstrap_kms_key() {
+  local key_id state desc unusable=0 found_id=""
 
   while read -r key_id; do
     [ -z "${key_id}" ] && continue
     state="$(aws kms describe-key --key-id "${key_id}" \
       --region "${AWS_REGION}" \
       --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
-    [ "${state}" != "PendingDeletion" ] && continue
-    pending=$((pending + 1))
+    if [ "${state}" != "PendingDeletion" ] && [ "${state}" != "Disabled" ]; then
+      continue
+    fi
+    unusable=$((unusable + 1))
     desc="$(aws kms describe-key --key-id "${key_id}" \
       --region "${AWS_REGION}" \
       --query 'KeyMetadata.Description' --output text 2>/dev/null || true)"
@@ -357,8 +359,8 @@ bootstrap_discover_pending_bootstrap_kms_key() {
   done < <(aws kms list-keys --region "${AWS_REGION}" \
     --query 'Keys[].KeyId' --output text 2>/dev/null | tr '\t' '\n')
 
-  if [ "${pending}" -eq 1 ] && [ -n "${found_id}" ]; then
-    echo "Using only PendingDeletion KMS key in account: ${found_id}" >&2
+  if [ "${unusable}" -eq 1 ] && [ -n "${found_id}" ]; then
+    echo "Using only unusable KMS key in account: ${found_id}" >&2
     printf '%s\n' "${found_id}"
     return 0
   fi
@@ -366,13 +368,36 @@ bootstrap_discover_pending_bootstrap_kms_key() {
   return 1
 }
 
-# Cancel scheduled KMS deletion so S3 state read/write works during destroy.
-bootstrap_cancel_kms_pending_deletion() {
+bootstrap_discover_pending_bootstrap_kms_key() {
+  bootstrap_discover_unusable_bootstrap_kms_key
+}
+
+# Wait until KMS key reaches Enabled (or fail after timeout).
+bootstrap_wait_kms_key_enabled() {
+  local key_id="$1" state attempt=0
+
+  while [ "${attempt}" -lt 30 ]; do
+    state="$(aws kms describe-key --key-id "${key_id}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+    if [ "${state}" = "Enabled" ]; then
+      echo "Bootstrap KMS key ${key_id} is Enabled."
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+  echo "::warning::KMS key ${key_id} not Enabled (state=${state})." >&2
+  return 1
+}
+
+# Re-enable Disabled keys and cancel PendingDeletion so S3 state read/write works.
+bootstrap_restore_kms_key_usability() {
   local key_id="${1:-}" state
 
   if [ -z "${key_id}" ]; then
     if ! key_id="$(bootstrap_resolve_kms_key_id 2>/dev/null)"; then
-      echo "No bootstrap KMS key found to check for pending deletion."
+      echo "No bootstrap KMS key found to restore."
       return 0
     fi
   fi
@@ -381,27 +406,34 @@ bootstrap_cancel_kms_pending_deletion() {
     --query 'KeyMetadata.KeyId' --output text 2>/dev/null || printf '%s' "${key_id}")"
 
   state="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
     --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
-  if [ "${state}" != "PendingDeletion" ]; then
-    echo "Bootstrap KMS key ${key_id} state: ${state:-unknown}"
-    return 0
-  fi
 
-  echo "Cancelling KMS key pending deletion: ${key_id}"
-  aws kms cancel-key-deletion --key-id "${key_id}" --region "${AWS_REGION}" >/dev/null
-  local attempt=0
-  while [ "${attempt}" -lt 30 ]; do
-    state="$(aws kms describe-key --key-id "${key_id}" \
-      --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
-    if [ "${state}" = "Enabled" ]; then
-      echo "Bootstrap KMS key ${key_id} is Enabled again."
+  case "${state}" in
+    Enabled)
+      echo "Bootstrap KMS key ${key_id} is already Enabled."
       return 0
-    fi
-    attempt=$((attempt + 1))
-    sleep 2
-  done
-  echo "::warning::KMS key ${key_id} not Enabled after cancel (state=${state})." >&2
-  return 1
+      ;;
+    Disabled)
+      echo "Enabling disabled KMS key: ${key_id}"
+      aws kms enable-key --key-id "${key_id}" --region "${AWS_REGION}"
+      bootstrap_wait_kms_key_enabled "${key_id}"
+      ;;
+    PendingDeletion)
+      echo "Cancelling KMS key pending deletion: ${key_id}"
+      aws kms cancel-key-deletion --key-id "${key_id}" --region "${AWS_REGION}"
+      bootstrap_wait_kms_key_enabled "${key_id}"
+      ;;
+    *)
+      echo "Bootstrap KMS key ${key_id} state: ${state:-unknown} (no action taken)."
+      return 0
+      ;;
+  esac
+}
+
+# Backward-compatible name.
+bootstrap_cancel_kms_pending_deletion() {
+  bootstrap_restore_kms_key_usability "$@"
 }
 
 # Recreate bootstrap KMS alias when it was deleted but the key still exists.
@@ -447,8 +479,8 @@ bootstrap_recover_kms() {
   kms_alias="$(bootstrap_kms_alias_name)"
 
   if [ -z "${key_override}" ]; then
-    if key_override="$(bootstrap_discover_pending_bootstrap_kms_key 2>/dev/null)"; then
-      echo "Discovered PendingDeletion bootstrap KMS key: ${key_override}" >&2
+    if key_override="$(bootstrap_discover_unusable_bootstrap_kms_key 2>/dev/null)"; then
+      echo "Discovered bootstrap KMS key needing recovery: ${key_override}" >&2
     fi
   fi
 
@@ -463,7 +495,7 @@ bootstrap_recover_kms() {
       --query 'KeyMetadata.Arn' --output text)"
   fi
 
-  bootstrap_cancel_kms_pending_deletion "${key_override}" || return 1
+  bootstrap_restore_kms_key_usability "${key_override}" || return 1
   bootstrap_ensure_kms_alias || return 1
 
   key_id="$(bootstrap_resolve_kms_key_id)"
@@ -492,7 +524,7 @@ bootstrap_recover_kms_required() {
   if bootstrap_recover_kms; then
     return 0
   fi
-  echo "::error::Bootstrap KMS must be Enabled before teardown (cancel PendingDeletion or set BOOTSTRAP_KMS_KEY_ARN)." >&2
+  echo "::error::Bootstrap KMS must be Enabled before teardown (enable Disabled, cancel PendingDeletion, or set BOOTSTRAP_KMS_KEY_ARN)." >&2
   return 1
 }
 
@@ -1990,6 +2022,16 @@ bootstrap_post_destroy_cleanup() {
     case "${state}" in
       Enabled)
         echo "Scheduling KMS key ${key_id} for deletion (10 day window)..."
+        aws kms schedule-key-deletion \
+          --key-id "${key_id}" \
+          --pending-window-in-days 10 \
+          --region "${AWS_REGION}" 2>/dev/null \
+          || echo "::warning::Could not schedule KMS key deletion for ${key_id}." >&2
+        ;;
+      Disabled)
+        echo "Enabling disabled KMS key ${key_id} before scheduling deletion..."
+        aws kms enable-key --key-id "${key_id}" --region "${AWS_REGION}" 2>/dev/null || true
+        bootstrap_wait_kms_key_enabled "${key_id}" || true
         aws kms schedule-key-deletion \
           --key-id "${key_id}" \
           --pending-window-in-days 10 \

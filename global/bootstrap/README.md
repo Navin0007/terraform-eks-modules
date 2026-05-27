@@ -133,7 +133,7 @@ bootstrap_init global/bootstrap
 
 `bootstrap_recover_kms` cancels key deletion, recreates `alias/{project}-{environment}-terraform-state`, and prints the key ID/ARN for backend init.
 
-**Alias gone vs key pending deletion:** destroying bootstrap removes the alias first; Terraform then schedules the underlying CMK for deletion (`deletion_window_in_days = 10`). The alias disappearing does not delete the key—the key stays in `PendingDeletion` until the window ends. S3 state encrypted with that key fails until you cancel deletion (recover) or wait and recreate bootstrap with a new key.
+**Alias gone vs key unusable:** destroying bootstrap removes the alias first; the CMK may become `PendingDeletion` (scheduled delete) or `Disabled`. Either state blocks S3 state access (`KMSInvalidStateException` / `KMS.DisabledException`). Run `bootstrap_recover_kms` to enable/cancel deletion and recreate the alias before plan/destroy, or use `bootstrap_finish_teardown` to empty the bucket and complete removal.
 
 To **remove** the key and bucket (full teardown after a failed destroy):
 
