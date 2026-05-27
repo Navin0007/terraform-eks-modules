@@ -203,7 +203,6 @@ dev_import_diagnostics() {
 
 tf_backend_config_args() {
   : "${TF_BACKEND_BUCKET:?Set TF_BACKEND_BUCKET}"
-  : "${TF_BACKEND_KMS_KEY_ID:?Set TF_BACKEND_KMS_KEY_ID}"
   : "${TF_BACKEND_DYNAMODB_TABLE:?Set TF_BACKEND_DYNAMODB_TABLE}"
   : "${TF_BACKEND_REGION:?Set TF_BACKEND_REGION}"
 
@@ -211,9 +210,11 @@ tf_backend_config_args() {
     "-backend-config=bucket=${TF_BACKEND_BUCKET}" \
     "-backend-config=key=${TF_BACKEND_KEY}" \
     "-backend-config=region=${TF_BACKEND_REGION}" \
-    "-backend-config=kms_key_id=${TF_BACKEND_KMS_KEY_ID}" \
     "-backend-config=dynamodb_table=${TF_BACKEND_DYNAMODB_TABLE}" \
     "-backend-config=encrypt=true"
+  if [ -n "${TF_BACKEND_KMS_KEY_ID:-}" ]; then
+    printf '%s\n' "-backend-config=kms_key_id=${TF_BACKEND_KMS_KEY_ID}"
+  fi
 }
 
 bootstrap_state_bucket_name() {
@@ -243,9 +244,11 @@ bootstrap_remote_backend_ready() {
   bootstrap_state_bucket_exists && bootstrap_kms_alias_exists
 }
 
-# True when bootstrap has not been migrated to S3 yet (first apply in this run).
+# True only for a brand-new bootstrap (no state bucket in AWS yet).
+# Terraform 1.7+ requires a configured S3 backend for import/plan when backend "s3" is declared;
+# if the bucket already exists, init the S3 backend instead of -backend=false.
 bootstrap_uses_local_state() {
-  [ -z "${TF_STATE_BUCKET:-}" ] && ! bootstrap_remote_backend_ready
+  [ -z "${TF_STATE_BUCKET:-}" ] && ! bootstrap_state_bucket_exists
 }
 
 # No extra CLI args: local state is established by bootstrap_init -backend=false.
@@ -275,6 +278,56 @@ bootstrap_set_backend_from_aws() {
   TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.Arn' --output text)"
 }
 
+# KMS key ID used to encrypt the existing state bucket (if SSE-KMS), else empty.
+bootstrap_kms_key_id_from_state_bucket() {
+  local bucket sse kms_master
+  bucket="$(bootstrap_state_bucket_name)"
+  sse="$(aws s3api get-bucket-encryption --bucket "${bucket}" \
+    --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' \
+    --output text 2>/dev/null || true)"
+  if [ "${sse}" != "aws:kms" ]; then
+    return 1
+  fi
+  kms_master="$(aws s3api get-bucket-encryption --bucket "${bucket}" \
+    --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID' \
+    --output text 2>/dev/null || true)"
+  if [ -z "${kms_master}" ] || [ "${kms_master}" = "None" ] || [ "${kms_master}" = "null" ]; then
+    return 1
+  fi
+  aws kms describe-key --key-id "${kms_master}" --query 'KeyMetadata.KeyId' --output text 2>/dev/null
+}
+
+# Partial bootstrap: S3 bucket exists; discover KMS from alias or bucket default encryption.
+bootstrap_set_backend_for_existing_bucket() {
+  tf_common_vars
+  export TF_BACKEND_BUCKET
+  TF_BACKEND_BUCKET="$(bootstrap_state_bucket_name)"
+  export TF_BACKEND_DYNAMODB_TABLE="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-locks"
+  export TF_BACKEND_REGION="${AWS_REGION}"
+  export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
+  unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
+
+  if bootstrap_kms_alias_exists; then
+    local kms_alias
+    kms_alias="$(bootstrap_kms_alias_name)"
+    export TF_BACKEND_KMS_KEY_ID
+    TF_BACKEND_KMS_KEY_ID="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
+    export TF_STATE_KMS_KEY_ARN
+    TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.Arn' --output text)"
+    return 0
+  fi
+
+  local key_id
+  if key_id="$(bootstrap_kms_key_id_from_state_bucket)"; then
+    export TF_BACKEND_KMS_KEY_ID="${key_id}"
+    export TF_STATE_KMS_KEY_ARN
+    TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" --query 'KeyMetadata.Arn' --output text)"
+    echo "Using KMS key ${key_id} from existing state bucket encryption (no alias yet)."
+  else
+    echo "State bucket exists without SSE-KMS; S3 backend will use bucket default encryption for state."
+  fi
+}
+
 # Resolve TF_BACKEND_* for plan/destroy when bootstrap was applied in a previous run.
 resolve_bootstrap_backend_env() {
   local bootstrap_dir
@@ -300,7 +353,9 @@ resolve_bootstrap_backend_env() {
   fi
 
   if bootstrap_state_bucket_exists; then
-    echo "::warning::State bucket exists but KMS alias is missing; treating bootstrap as incomplete." >&2
+    bootstrap_set_backend_for_existing_bucket
+    echo "Using bootstrap backend from existing state bucket (partial bootstrap)."
+    return 0
   fi
 
   if [ -f "${bootstrap_dir}/terraform.tfstate" ]; then
@@ -402,12 +457,14 @@ bootstrap_init() {
     # Bootstrap was applied previously; use remote state even without TF_STATE_* vars.
     bootstrap_set_backend_from_aws
     mapfile -t backend_args < <(tf_backend_config_args)
-    terraform init -input=false "${backend_args[@]}"
+    terraform init -input=false -reconfigure "${backend_args[@]}"
+  elif bootstrap_state_bucket_exists; then
+    # Bucket exists (partial bootstrap). Init S3 backend so import/plan work on Terraform 1.7+.
+    bootstrap_set_backend_for_existing_bucket
+    mapfile -t backend_args < <(tf_backend_config_args)
+    terraform init -input=false -reconfigure "${backend_args[@]}"
   else
-    # First apply or partial bootstrap (e.g. bucket without KMS); local state until migration.
-    if bootstrap_state_bucket_exists; then
-      echo "::warning::State bucket exists but KMS alias is missing; using local backend for bootstrap apply." >&2
-    fi
+    # Brand-new bootstrap: no state bucket yet; local state until maybe_migrate_bootstrap_state.
     terraform init -input=false -backend=false
   fi
 
@@ -454,6 +511,9 @@ import_existing_bootstrap_resources() {
     key_id="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
     import_if_missing aws_kms_key.terraform_state "${key_id}"
     import_if_missing aws_kms_alias.terraform_state "${kms_alias}"
+  elif key_id="$(bootstrap_kms_key_id_from_state_bucket)"; then
+    echo "Importing KMS key from state bucket encryption (alias not created yet)..."
+    import_if_missing aws_kms_key.terraform_state "${key_id}"
   fi
 
   if aws s3api head-bucket --bucket "${state_bucket}" &>/dev/null; then
