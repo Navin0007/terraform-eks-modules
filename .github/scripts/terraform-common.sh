@@ -227,9 +227,25 @@ bootstrap_state_bucket_exists() {
   aws s3api head-bucket --bucket "${bucket}" &>/dev/null
 }
 
+bootstrap_kms_alias_name() {
+  tf_common_vars
+  printf '%s\n' "alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
+}
+
+bootstrap_kms_alias_exists() {
+  local kms_alias
+  kms_alias="$(bootstrap_kms_alias_name)"
+  aws kms describe-key --key-id "${kms_alias}" &>/dev/null
+}
+
+# Remote backend is only usable after a full bootstrap (bucket + KMS alias).
+bootstrap_remote_backend_ready() {
+  bootstrap_state_bucket_exists && bootstrap_kms_alias_exists
+}
+
 # True when bootstrap has not been migrated to S3 yet (first apply in this run).
 bootstrap_uses_local_state() {
-  [ -z "${TF_STATE_BUCKET:-}" ] && ! bootstrap_state_bucket_exists
+  [ -z "${TF_STATE_BUCKET:-}" ] && ! bootstrap_remote_backend_ready
 }
 
 # Emit -state=terraform.tfstate for plan/import/apply/output before S3 migration.
@@ -247,7 +263,12 @@ bootstrap_set_backend_from_aws() {
   export TF_BACKEND_REGION="${AWS_REGION}"
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
 
-  local kms_alias="alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
+  local kms_alias
+  kms_alias="$(bootstrap_kms_alias_name)"
+  if ! bootstrap_kms_alias_exists; then
+    echo "::warning::KMS alias ${kms_alias} not found; remote backend is not ready." >&2
+    return 1
+  fi
   export TF_BACKEND_KMS_KEY_ID
   TF_BACKEND_KMS_KEY_ID="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
   export TF_STATE_KMS_KEY_ARN
@@ -272,10 +293,14 @@ resolve_bootstrap_backend_env() {
     return 0
   fi
 
-  if bootstrap_state_bucket_exists; then
+  if bootstrap_remote_backend_ready; then
     bootstrap_set_backend_from_aws
     echo "Using bootstrap backend from existing S3 bucket and KMS alias in AWS."
     return 0
+  fi
+
+  if bootstrap_state_bucket_exists; then
+    echo "::warning::State bucket exists but KMS alias is missing; treating bootstrap as incomplete." >&2
   fi
 
   if [ -f "${bootstrap_dir}/terraform.tfstate" ]; then
@@ -373,13 +398,16 @@ bootstrap_init() {
     export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
     mapfile -t backend_args < <(tf_backend_config_args)
     terraform init -input=false "${backend_args[@]}"
-  elif bootstrap_state_bucket_exists; then
+  elif bootstrap_remote_backend_ready; then
     # Bootstrap was applied previously; use remote state even without TF_STATE_* vars.
     bootstrap_set_backend_from_aws
     mapfile -t backend_args < <(tf_backend_config_args)
     terraform init -input=false "${backend_args[@]}"
   else
-    # Bucket does not exist yet; keep state local until maybe_migrate_bootstrap_state runs.
+    # First apply or partial bootstrap (e.g. bucket without KMS); local state until migration.
+    if bootstrap_state_bucket_exists; then
+      echo "::warning::State bucket exists but KMS alias is missing; using local backend for bootstrap apply." >&2
+    fi
     terraform init -input=false -backend=false
   fi
 
