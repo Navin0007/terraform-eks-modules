@@ -313,6 +313,22 @@ bootstrap_kms_key_id_from_state_bucket() {
   aws kms describe-key --key-id "${kms_master}" --query 'KeyMetadata.KeyId' --output text 2>/dev/null
 }
 
+bootstrap_s3_bucket_versioning_exists() {
+  local bucket="$1"
+  local status
+  status="$(aws s3api get-bucket-versioning --bucket "${bucket}" \
+    --query 'Status' --output text 2>/dev/null || true)"
+  [ -n "${status}" ] && [ "${status}" != "None" ] && [ "${status}" != "null" ]
+}
+
+bootstrap_s3_bucket_encryption_exists() {
+  aws s3api get-bucket-encryption --bucket "$1" &>/dev/null
+}
+
+bootstrap_s3_bucket_public_access_block_exists() {
+  aws s3api get-public-access-block --bucket "$1" &>/dev/null
+}
+
 # Partial bootstrap: S3 bucket exists; discover KMS from alias or bucket default encryption.
 bootstrap_set_backend_for_existing_bucket() {
   tf_common_vars
@@ -566,9 +582,21 @@ import_existing_bootstrap_resources() {
 
   if aws s3api head-bucket --bucket "${state_bucket}" &>/dev/null; then
     import_if_missing aws_s3_bucket.terraform_state "${state_bucket}"
-    import_if_missing aws_s3_bucket_versioning.terraform_state "${state_bucket}"
-    import_if_missing aws_s3_bucket_server_side_encryption_configuration.terraform_state "${state_bucket}"
-    import_if_missing aws_s3_bucket_public_access_block.terraform_state "${state_bucket}"
+    if bootstrap_s3_bucket_versioning_exists "${state_bucket}"; then
+      import_if_missing aws_s3_bucket_versioning.terraform_state "${state_bucket}"
+    else
+      echo "Skipping import of aws_s3_bucket_versioning.terraform_state (not configured on ${state_bucket}); apply will create it." >&2
+    fi
+    if bootstrap_s3_bucket_encryption_exists "${state_bucket}"; then
+      import_if_missing aws_s3_bucket_server_side_encryption_configuration.terraform_state "${state_bucket}"
+    else
+      echo "Skipping import of aws_s3_bucket_server_side_encryption_configuration.terraform_state (not configured on ${state_bucket}); apply will create it." >&2
+    fi
+    if bootstrap_s3_bucket_public_access_block_exists "${state_bucket}"; then
+      import_if_missing aws_s3_bucket_public_access_block.terraform_state "${state_bucket}"
+    else
+      echo "Skipping import of aws_s3_bucket_public_access_block.terraform_state (not configured on ${state_bucket}); apply will create it." >&2
+    fi
   fi
 
   if aws dynamodb describe-table --table-name "${dynamodb_table}" &>/dev/null; then
