@@ -1,4 +1,4 @@
-# Remote state backend (S3 + DynamoDB + KMS).
+# Remote state backend (S3 + lockfile + KMS).
 #
 # Backend arguments cannot use Terraform variables. For local applies, copy bootstrap
 # outputs into -backend-config files or pass -backend-config flags on init (see
@@ -6,7 +6,7 @@
 #
 #   bucket         <- state_bucket_name
 #   kms_key_id     <- kms_key_id
-#   dynamodb_table <- dynamodb_table_name
+#   use_lockfile   <- true
 #   region         <- same as var.region
 terraform {
   backend "s3" {

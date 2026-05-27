@@ -205,21 +205,14 @@ tf_backend_config_args() {
   : "${TF_BACKEND_BUCKET:?Set TF_BACKEND_BUCKET}"
   : "${TF_BACKEND_REGION:?Set TF_BACKEND_REGION}"
 
-  local lock_table="${TF_BACKEND_DYNAMODB_TABLE:-$(bootstrap_dynamodb_table_name)}"
-
   printf '%s\n' \
     "-backend-config=bucket=${TF_BACKEND_BUCKET}" \
     "-backend-config=key=${TF_BACKEND_KEY}" \
     "-backend-config=region=${TF_BACKEND_REGION}" \
-    "-backend-config=encrypt=true"
+    "-backend-config=encrypt=true" \
+    "-backend-config=use_lockfile=true"
   if [ -n "${TF_BACKEND_KMS_KEY_ID:-}" ]; then
     printf '%s\n' "-backend-config=kms_key_id=${TF_BACKEND_KMS_KEY_ID}"
-  fi
-  # Omit dynamodb_table until the lock table exists (partial bootstrap).
-  if bootstrap_dynamodb_table_exists "${lock_table}"; then
-    printf '%s\n' "-backend-config=dynamodb_table=${lock_table}"
-  else
-    echo "DynamoDB lock table ${lock_table} not found; Terraform state locking disabled for this run." >&2
   fi
 }
 
@@ -550,16 +543,11 @@ maybe_migrate_bootstrap_state() {
   bootstrap_enable_state_locking "${bootstrap_dir}"
 }
 
-# Re-init bootstrap backend with DynamoDB locking after the lock table is created.
+# Re-init bootstrap backend with S3 lockfile-based state locking.
 bootstrap_enable_state_locking() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   tf_common_vars
-
-  if ! bootstrap_dynamodb_table_exists; then
-    echo "Lock table $(bootstrap_dynamodb_table_name) not found yet; skipping DynamoDB state locking setup."
-    return 0
-  fi
 
   pushd "${bootstrap_dir}" >/dev/null
   if [ -n "${TF_STATE_BUCKET:-}" ]; then
@@ -574,7 +562,7 @@ bootstrap_enable_state_locking() {
     return 0
   fi
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
-  echo "Enabling DynamoDB state locking on table ${TF_BACKEND_DYNAMODB_TABLE}..."
+  echo "Enabling S3 lockfile state locking..."
   mapfile -t backend_args < <(tf_backend_config_args)
   terraform init -input=false -reconfigure "${backend_args[@]}"
   popd >/dev/null
