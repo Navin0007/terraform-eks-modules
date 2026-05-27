@@ -329,6 +329,82 @@ bootstrap_s3_bucket_public_access_block_exists() {
   aws s3api get-public-access-block --bucket "$1" &>/dev/null
 }
 
+bootstrap_precheck_report() {
+  tf_common_vars
+
+  local bucket table kms_alias
+  local -a existing_items=()
+  local -a missing_items=()
+  local kms_from_bucket=""
+  bucket="$(bootstrap_state_bucket_name)"
+  table="$(bootstrap_dynamodb_table_name)"
+  kms_alias="$(bootstrap_kms_alias_name)"
+
+  if bootstrap_state_bucket_exists; then
+    existing_items+=("s3_bucket")
+    if bootstrap_s3_bucket_versioning_exists "${bucket}"; then
+      existing_items+=("s3_bucket_versioning")
+    else
+      missing_items+=("s3_bucket_versioning")
+    fi
+    if bootstrap_s3_bucket_encryption_exists "${bucket}"; then
+      existing_items+=("s3_bucket_sse")
+    else
+      missing_items+=("s3_bucket_sse")
+    fi
+    if bootstrap_s3_bucket_public_access_block_exists "${bucket}"; then
+      existing_items+=("s3_public_access_block")
+    else
+      missing_items+=("s3_public_access_block")
+    fi
+  else
+    missing_items+=("s3_bucket" "s3_bucket_versioning" "s3_bucket_sse" "s3_public_access_block")
+  fi
+
+  if bootstrap_kms_alias_exists; then
+    existing_items+=("kms_alias")
+  else
+    missing_items+=("kms_alias")
+  fi
+
+  if kms_from_bucket="$(bootstrap_kms_key_id_from_state_bucket 2>/dev/null)"; then
+    if [ -n "${kms_from_bucket}" ]; then
+      existing_items+=("kms_key_reference")
+    fi
+  fi
+  if [ -z "${kms_from_bucket}" ] && ! bootstrap_kms_alias_exists; then
+    missing_items+=("kms_key_reference")
+  fi
+
+  if bootstrap_dynamodb_table_exists "${table}"; then
+    existing_items+=("dynamodb_lock_table")
+  else
+    missing_items+=("dynamodb_lock_table")
+  fi
+
+  local status="ready"
+  if [ "${#missing_items[@]}" -gt 0 ] && [ "${#existing_items[@]}" -eq 0 ]; then
+    status="fresh"
+  elif [ "${#missing_items[@]}" -gt 0 ]; then
+    status="partial"
+  fi
+
+  export BOOTSTRAP_PRECHECK_STATUS="${status}"
+  echo "Bootstrap precheck status: ${status}"
+  echo "Expected primary services: KMS, S3, DynamoDB"
+  if [ "${#existing_items[@]}" -gt 0 ]; then
+    echo "Existing bootstrap items: ${existing_items[*]}"
+  else
+    echo "Existing bootstrap items: none"
+  fi
+  if [ "${#missing_items[@]}" -gt 0 ]; then
+    echo "Missing bootstrap items: ${missing_items[*]}"
+    echo "Proceeding with import/apply to reconcile missing resources."
+  else
+    echo "Missing bootstrap items: none"
+  fi
+}
+
 # Partial bootstrap: S3 bucket exists; discover KMS from alias or bucket default encryption.
 bootstrap_set_backend_for_existing_bucket() {
   tf_common_vars
