@@ -203,17 +203,23 @@ dev_import_diagnostics() {
 
 tf_backend_config_args() {
   : "${TF_BACKEND_BUCKET:?Set TF_BACKEND_BUCKET}"
-  : "${TF_BACKEND_DYNAMODB_TABLE:?Set TF_BACKEND_DYNAMODB_TABLE}"
   : "${TF_BACKEND_REGION:?Set TF_BACKEND_REGION}"
+
+  local lock_table="${TF_BACKEND_DYNAMODB_TABLE:-$(bootstrap_dynamodb_table_name)}"
 
   printf '%s\n' \
     "-backend-config=bucket=${TF_BACKEND_BUCKET}" \
     "-backend-config=key=${TF_BACKEND_KEY}" \
     "-backend-config=region=${TF_BACKEND_REGION}" \
-    "-backend-config=dynamodb_table=${TF_BACKEND_DYNAMODB_TABLE}" \
     "-backend-config=encrypt=true"
   if [ -n "${TF_BACKEND_KMS_KEY_ID:-}" ]; then
     printf '%s\n' "-backend-config=kms_key_id=${TF_BACKEND_KMS_KEY_ID}"
+  fi
+  # Omit dynamodb_table until the lock table exists (partial bootstrap).
+  if bootstrap_dynamodb_table_exists "${lock_table}"; then
+    printf '%s\n' "-backend-config=dynamodb_table=${lock_table}"
+  else
+    echo "DynamoDB lock table ${lock_table} not found; Terraform state locking disabled for this run."
   fi
 }
 
@@ -226,6 +232,16 @@ bootstrap_state_bucket_exists() {
   local bucket
   bucket="$(bootstrap_state_bucket_name)"
   aws s3api head-bucket --bucket "${bucket}" &>/dev/null
+}
+
+bootstrap_dynamodb_table_name() {
+  tf_common_vars
+  printf '%s\n' "${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-locks"
+}
+
+bootstrap_dynamodb_table_exists() {
+  local table="${1:-$(bootstrap_dynamodb_table_name)}"
+  aws dynamodb describe-table --table-name "${table}" --region "${AWS_REGION}" &>/dev/null
 }
 
 bootstrap_kms_alias_name() {
@@ -429,6 +445,7 @@ maybe_migrate_bootstrap_state() {
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
 
   if [ -n "${TF_STATE_BUCKET:-}" ]; then
+    bootstrap_enable_state_locking "${bootstrap_dir}"
     return 0
   fi
 
@@ -437,6 +454,37 @@ maybe_migrate_bootstrap_state() {
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
   mapfile -t backend_args < <(tf_backend_config_args)
   terraform init -input=false -migrate-state -force-copy "${backend_args[@]}"
+  popd >/dev/null
+  bootstrap_enable_state_locking "${bootstrap_dir}"
+}
+
+# Re-init bootstrap backend with DynamoDB locking after the lock table is created.
+bootstrap_enable_state_locking() {
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
+  tf_common_vars
+
+  if ! bootstrap_dynamodb_table_exists; then
+    echo "Lock table $(bootstrap_dynamodb_table_name) not found yet; skipping DynamoDB state locking setup."
+    return 0
+  fi
+
+  pushd "${bootstrap_dir}" >/dev/null
+  if [ -n "${TF_STATE_BUCKET:-}" ]; then
+    export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
+    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
+    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
+    export TF_BACKEND_REGION="${AWS_REGION}"
+  elif bootstrap_state_bucket_exists; then
+    bootstrap_set_backend_for_existing_bucket
+  else
+    popd >/dev/null
+    return 0
+  fi
+  export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
+  echo "Enabling DynamoDB state locking on table ${TF_BACKEND_DYNAMODB_TABLE}..."
+  mapfile -t backend_args < <(tf_backend_config_args)
+  terraform init -input=false -reconfigure "${backend_args[@]}"
   popd >/dev/null
 }
 

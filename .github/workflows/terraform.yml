@@ -201,6 +201,7 @@ jobs:
           mapfile -t var_args < <(tf_var_args)
           mapfile -t state_args < <(bootstrap_local_state_args)
           terraform apply -input=false -auto-approve -no-color "${state_args[@]}" "${var_args[@]}"
+          bootstrap_enable_state_locking global/bootstrap
 
       - name: Migrate bootstrap state to S3
         if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
