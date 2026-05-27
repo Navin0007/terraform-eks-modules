@@ -63,10 +63,13 @@ tf_dev_extra_var_args() {
 # Export dev root-module variables for terraform import/plan/apply (more reliable than -var alone).
 tf_export_dev_vars() {
   tf_common_vars
-  : "${TF_STATE_KMS_KEY_ARN:?Set TF_STATE_KMS_KEY_ARN (bootstrap output kms_key_arn)}"
   : "${TF_BACKEND_BUCKET:?Set TF_BACKEND_BUCKET or TF_STATE_BUCKET (bootstrap state bucket)}"
 
-  export TF_VAR_state_kms_key_arn="${TF_STATE_KMS_KEY_ARN}"
+  if [ -z "${TF_STATE_KMS_KEY_ARN:-}" ]; then
+    echo "::warning::TF_STATE_KMS_KEY_ARN is unset (partial bootstrap); EKS KMS settings may be incomplete until bootstrap apply completes." >&2
+  fi
+
+  export TF_VAR_state_kms_key_arn="${TF_STATE_KMS_KEY_ARN:-}"
   export TF_VAR_state_bucket_name="${TF_BACKEND_BUCKET}"
   export TF_VAR_state_kms_key_id="${TF_BACKEND_KMS_KEY_ID:-}"
   export TF_VAR_dynamodb_table_name="${TF_BACKEND_DYNAMODB_TABLE:-}"
@@ -575,6 +578,8 @@ bootstrap_set_backend_for_existing_bucket() {
     echo "Using KMS key ${key_id} from existing state bucket encryption (no alias yet)." >&2
   else
     echo "State bucket exists without SSE-KMS; S3 backend will use bucket default encryption for state." >&2
+    export TF_BACKEND_KMS_KEY_ID=""
+    export TF_STATE_KMS_KEY_ARN=""
   fi
 }
 
@@ -637,9 +642,9 @@ export_bootstrap_backend_env() {
 
   {
     echo "TF_BACKEND_BUCKET=${TF_BACKEND_BUCKET}"
-    echo "TF_BACKEND_KMS_KEY_ID=${TF_BACKEND_KMS_KEY_ID}"
-    echo "TF_BACKEND_DYNAMODB_TABLE=${TF_BACKEND_DYNAMODB_TABLE}"
-    echo "TF_STATE_KMS_KEY_ARN=${TF_STATE_KMS_KEY_ARN}"
+    echo "TF_BACKEND_KMS_KEY_ID=${TF_BACKEND_KMS_KEY_ID:-}"
+    echo "TF_BACKEND_DYNAMODB_TABLE=${TF_BACKEND_DYNAMODB_TABLE:-}"
+    echo "TF_STATE_KMS_KEY_ARN=${TF_STATE_KMS_KEY_ARN:-}"
     echo "TF_BACKEND_REGION=${TF_BACKEND_REGION}"
   } >> "${GITHUB_ENV}"
 }
@@ -701,9 +706,13 @@ bootstrap_enable_state_locking() {
   pushd "${bootstrap_dir}" >/dev/null
   if [ -n "${TF_STATE_BUCKET:-}" ]; then
     export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
-    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
-    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
+    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID:-}"
+    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE:-}"
+    export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN:-}"
     export TF_BACKEND_REGION="${AWS_REGION}"
+    if [ -z "${TF_BACKEND_KMS_KEY_ID}" ] && bootstrap_state_bucket_exists; then
+      bootstrap_set_backend_for_existing_bucket
+    fi
   elif bootstrap_state_bucket_exists; then
     bootstrap_set_backend_for_existing_bucket
   else
@@ -724,9 +733,13 @@ bootstrap_init() {
 
   if [ -n "${TF_STATE_BUCKET:-}" ]; then
     export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
-    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
-    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
+    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID:-}"
+    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE:-}"
+    export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN:-}"
     export TF_BACKEND_REGION="${AWS_REGION}"
+    if [ -z "${TF_BACKEND_KMS_KEY_ID}" ] && bootstrap_state_bucket_exists; then
+      bootstrap_set_backend_for_existing_bucket
+    fi
     export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
     mapfile -t backend_args < <(tf_backend_config_args)
     terraform init -input=false "${backend_args[@]}"
@@ -1617,7 +1630,7 @@ ensure_remote_state_object_exists() {
 
   resolve_bootstrap_backend_env "$(bootstrap_dir_abs global/bootstrap)"
   bucket="${TF_BACKEND_BUCKET}"
-  kms_arn="${TF_STATE_KMS_KEY_ARN}"
+  kms_arn="${TF_STATE_KMS_KEY_ARN:-}"
 
   if aws s3api head-object --bucket "${bucket}" --key "${state_key}" --region "${AWS_REGION}" &>/dev/null; then
     echo "State object s3://${bucket}/${state_key} exists."
@@ -1630,10 +1643,16 @@ ensure_remote_state_object_exists() {
   printf '%s\n' \
     '{"version":4,"terraform_version":"1.7.5","serial":1,"lineage":"destroy-recovery","outputs":{},"resources":[]}' \
     >"${tmp}"
-  aws s3 cp "${tmp}" "s3://${bucket}/${state_key}" \
-    --region "${AWS_REGION}" \
-    --sse aws:kms \
-    --sse-kms-key-id "${kms_arn}"
+  if [ -n "${kms_arn}" ]; then
+    aws s3 cp "${tmp}" "s3://${bucket}/${state_key}" \
+      --region "${AWS_REGION}" \
+      --sse aws:kms \
+      --sse-kms-key-id "${kms_arn}"
+  else
+    aws s3 cp "${tmp}" "s3://${bucket}/${state_key}" \
+      --region "${AWS_REGION}" \
+      --sse AES256
+  fi
   rm -f "${tmp}"
 }
 
