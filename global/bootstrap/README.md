@@ -117,6 +117,22 @@ terraform import -var=project_name=... -var=environment=... -var=region=... -var
   aws_dynamodb_table.terraform_state_lock my-project-dev-terraform-locks
 ```
 
+### Recover KMS key pending deletion (alias missing)
+
+If destroy scheduled the bootstrap KMS key for deletion (`PendingDeletion`) and removed the alias, S3 state reads fail with `KMSInvalidStateException`. Recover with:
+
+```bash
+source .github/scripts/terraform-common.sh
+export TF_PROJECT_NAME=my-project TF_ENVIRONMENT=dev AWS_REGION=us-east-1 AWS_ACCOUNT_ID=123456789012
+
+# Optional: pass key ID or ARN if auto-discovery fails
+bootstrap_recover_kms arn:aws:kms:us-east-1:123456789012:key/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+bootstrap_init global/bootstrap
+```
+
+`bootstrap_recover_kms` cancels key deletion, recreates `alias/{project}-{environment}-terraform-state`, and prints the key ID/ARN for backend init.
+
 ## GitHub Actions
 
 The workflow [`.github/workflows/terraform.yml`](../../.github/workflows/terraform.yml) runs on pull requests and pushes that change Terraform files.

@@ -321,6 +321,12 @@ bootstrap_resolve_kms_key_id() {
     printf '%s\n' "${TF_STATE_KMS_KEY_ID}"
     return 0
   fi
+  if [ -n "${TF_STATE_KMS_KEY_ARN:-}" ]; then
+    aws kms describe-key --key-id "${TF_STATE_KMS_KEY_ARN}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyId' --output text 2>/dev/null
+    return 0
+  fi
   kms_alias="$(bootstrap_kms_alias_name)"
   if bootstrap_kms_alias_exists; then
     aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text
@@ -331,12 +337,17 @@ bootstrap_resolve_kms_key_id() {
 
 # Cancel scheduled KMS deletion so S3 state read/write works during destroy.
 bootstrap_cancel_kms_pending_deletion() {
-  local key_id state
+  local key_id="${1:-}" state
 
-  if ! key_id="$(bootstrap_resolve_kms_key_id 2>/dev/null)"; then
-    echo "No bootstrap KMS key found to check for pending deletion."
-    return 0
+  if [ -z "${key_id}" ]; then
+    if ! key_id="$(bootstrap_resolve_kms_key_id 2>/dev/null)"; then
+      echo "No bootstrap KMS key found to check for pending deletion."
+      return 0
+    fi
   fi
+  key_id="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.KeyId' --output text 2>/dev/null || printf '%s' "${key_id}")"
 
   state="$(aws kms describe-key --key-id "${key_id}" \
     --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
@@ -360,6 +371,82 @@ bootstrap_cancel_kms_pending_deletion() {
   done
   echo "::warning::KMS key ${key_id} not Enabled after cancel (state=${state})." >&2
   return 1
+}
+
+# Recreate bootstrap KMS alias when it was deleted but the key still exists.
+bootstrap_ensure_kms_alias() {
+  local key_id kms_alias target
+
+  kms_alias="$(bootstrap_kms_alias_name)"
+  if ! key_id="$(bootstrap_resolve_kms_key_id 2>/dev/null)"; then
+    echo "::error::Cannot resolve bootstrap KMS key ID to attach alias ${kms_alias}." >&2
+    return 1
+  fi
+
+  if bootstrap_kms_alias_exists; then
+    target="$(aws kms describe-key --key-id "${kms_alias}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyId' --output text)"
+    if [ "${target}" = "${key_id}" ]; then
+      echo "KMS alias ${kms_alias} already points to key ${key_id}."
+      return 0
+    fi
+    echo "Updating KMS alias ${kms_alias} -> key ${key_id} (was ${target})..."
+    aws kms update-alias \
+      --alias-name "${kms_alias}" \
+      --target-key-id "${key_id}" \
+      --region "${AWS_REGION}"
+    return 0
+  fi
+
+  echo "Creating KMS alias ${kms_alias} -> key ${key_id}..."
+  aws kms create-alias \
+    --alias-name "${kms_alias}" \
+    --target-key-id "${key_id}" \
+    --region "${AWS_REGION}"
+}
+
+# Recover bootstrap KMS after failed destroy: cancel pending deletion and restore alias.
+# Usage: bootstrap_recover_kms [key-id-or-arn]
+bootstrap_recover_kms() {
+  local key_override="${1:-}" key_id kms_alias
+
+  tf_common_vars
+  kms_alias="$(bootstrap_kms_alias_name)"
+
+  if [ -n "${key_override}" ]; then
+    key_id="$(aws kms describe-key --key-id "${key_override}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyId' --output text)"
+    export TF_BACKEND_KMS_KEY_ID="${key_id}"
+    export TF_STATE_KMS_KEY_ARN
+    TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.Arn' --output text)"
+  fi
+
+  bootstrap_cancel_kms_pending_deletion "${key_override}" || return 1
+  bootstrap_ensure_kms_alias || return 1
+
+  key_id="$(bootstrap_resolve_kms_key_id)"
+  export TF_BACKEND_KMS_KEY_ID="${key_id}"
+  export TF_STATE_KMS_KEY_ARN
+  TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.Arn' --output text)"
+
+  if bootstrap_state_bucket_exists; then
+    export TF_BACKEND_BUCKET="$(bootstrap_state_bucket_name)"
+    export TF_BACKEND_REGION="${AWS_REGION}"
+    export TF_BACKEND_DYNAMODB_TABLE="$(bootstrap_dynamodb_table_name)"
+    export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
+  fi
+
+  echo "Bootstrap KMS recovery complete."
+  echo "  Alias: ${kms_alias}"
+  echo "  Key ID: ${key_id}"
+  echo "  Key ARN: ${TF_STATE_KMS_KEY_ARN}"
+  echo "Next: bootstrap_init global/bootstrap  (or re-run the Terraform workflow)"
 }
 
 # Delete every version/delete-marker for one exact S3 object key.
@@ -1660,7 +1747,7 @@ ensure_remote_state_object_exists() {
 repair_remote_state_backend_for_destroy() {
   local table bucket state_key
 
-  bootstrap_cancel_kms_pending_deletion || true
+  bootstrap_recover_kms || true
   resolve_bootstrap_backend_env "$(bootstrap_dir_abs global/bootstrap)"
   table="${TF_BACKEND_DYNAMODB_TABLE}"
   bucket="${TF_BACKEND_BUCKET}"
@@ -1700,7 +1787,7 @@ remove_downstream_remote_state_keys() {
 prepare_bootstrap_destroy() {
   local bootstrap_abs
   bootstrap_abs="$(bootstrap_dir_abs global/bootstrap)"
-  bootstrap_cancel_kms_pending_deletion || true
+  bootstrap_recover_kms || true
   repair_remote_state_backend_for_destroy
   bootstrap_init "${bootstrap_abs}"
   echo "Importing bootstrap resources into state (recovery after partial destroy)..."
@@ -1714,7 +1801,7 @@ bootstrap_terraform_destroy() {
   bootstrap_abs="$(bootstrap_dir_abs "${bootstrap_dir}")"
   bucket="$(bootstrap_state_bucket_name)"
 
-  bootstrap_cancel_kms_pending_deletion || true
+  bootstrap_recover_kms || true
   clear_s3_state_lockfiles "${bucket}"
 
   pushd "${bootstrap_abs}" >/dev/null
@@ -1733,7 +1820,7 @@ bootstrap_terraform_destroy() {
       "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}" || true
   done
 
-  bootstrap_cancel_kms_pending_deletion || true
+  bootstrap_recover_kms || true
 
   terraform destroy -input=false -auto-approve -no-color \
     "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}"
@@ -1741,11 +1828,11 @@ bootstrap_terraform_destroy() {
 
   if [ "${rc}" -ne 0 ]; then
     echo "::warning::Bootstrap destroy failed (exit ${rc}); attempting KMS recovery and bucket cleanup."
-    bootstrap_cancel_kms_pending_deletion || true
+    bootstrap_recover_kms || true
     clear_s3_state_lockfiles "${bucket}"
     if bootstrap_state_bucket_exists; then
       bootstrap_empty_state_bucket_all_versions "${bucket}"
-      bootstrap_cancel_kms_pending_deletion || true
+      bootstrap_recover_kms || true
       terraform destroy -input=false -auto-approve -no-color \
         "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}" || rc=$?
     fi
@@ -1759,7 +1846,7 @@ bootstrap_terraform_destroy() {
 bootstrap_post_destroy_cleanup() {
   local bucket kms_alias
 
-  bootstrap_cancel_kms_pending_deletion || true
+  bootstrap_recover_kms || true
   bucket="$(bootstrap_state_bucket_name)"
   if bootstrap_state_bucket_exists; then
     echo "State bucket still exists; removing all versioned objects..."
@@ -1772,7 +1859,6 @@ bootstrap_post_destroy_cleanup() {
   if bootstrap_kms_alias_exists; then
     aws kms delete-alias --alias-name "${kms_alias}" --region "${AWS_REGION}" 2>/dev/null || true
   fi
-  bootstrap_cancel_kms_pending_deletion || true
 }
 
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).
