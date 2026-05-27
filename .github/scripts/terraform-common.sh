@@ -335,6 +335,37 @@ bootstrap_resolve_kms_key_id() {
   bootstrap_kms_key_id_from_state_bucket
 }
 
+# Find bootstrap KMS keys scheduled for deletion when alias/bucket discovery fails.
+bootstrap_discover_pending_bootstrap_kms_key() {
+  local key_id state desc pending=0 found_id=""
+
+  while read -r key_id; do
+    [ -z "${key_id}" ] && continue
+    state="$(aws kms describe-key --key-id "${key_id}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+    [ "${state}" != "PendingDeletion" ] && continue
+    pending=$((pending + 1))
+    desc="$(aws kms describe-key --key-id "${key_id}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.Description' --output text 2>/dev/null || true)"
+    if [[ "${desc}" == *"Terraform remote state encryption for ${TF_PROJECT_NAME} (${TF_ENVIRONMENT})"* ]]; then
+      printf '%s\n' "${key_id}"
+      return 0
+    fi
+    found_id="${key_id}"
+  done < <(aws kms list-keys --region "${AWS_REGION}" \
+    --query 'Keys[].KeyId' --output text 2>/dev/null | tr '\t' '\n')
+
+  if [ "${pending}" -eq 1 ] && [ -n "${found_id}" ]; then
+    echo "Using only PendingDeletion KMS key in account: ${found_id}" >&2
+    printf '%s\n' "${found_id}"
+    return 0
+  fi
+
+  return 1
+}
+
 # Cancel scheduled KMS deletion so S3 state read/write works during destroy.
 bootstrap_cancel_kms_pending_deletion() {
   local key_id="${1:-}" state
@@ -408,11 +439,18 @@ bootstrap_ensure_kms_alias() {
 
 # Recover bootstrap KMS after failed destroy: cancel pending deletion and restore alias.
 # Usage: bootstrap_recover_kms [key-id-or-arn]
+# Or set BOOTSTRAP_KMS_KEY_ARN / TF_STATE_KMS_KEY_ARN in the environment.
 bootstrap_recover_kms() {
-  local key_override="${1:-}" key_id kms_alias
+  local key_override="${1:-${BOOTSTRAP_KMS_KEY_ARN:-${TF_STATE_KMS_KEY_ARN:-}}}" key_id kms_alias
 
   tf_common_vars
   kms_alias="$(bootstrap_kms_alias_name)"
+
+  if [ -z "${key_override}" ]; then
+    if key_override="$(bootstrap_discover_pending_bootstrap_kms_key 2>/dev/null)"; then
+      echo "Discovered PendingDeletion bootstrap KMS key: ${key_override}" >&2
+    fi
+  fi
 
   if [ -n "${key_override}" ]; then
     key_id="$(aws kms describe-key --key-id "${key_override}" \
@@ -447,6 +485,47 @@ bootstrap_recover_kms() {
   echo "  Key ID: ${key_id}"
   echo "  Key ARN: ${TF_STATE_KMS_KEY_ARN}"
   echo "Next: bootstrap_init global/bootstrap  (or re-run the Terraform workflow)"
+}
+
+# Tear down bootstrap KMS: cancel pending deletion, empty state bucket, delete alias, schedule key deletion.
+# Usage: bootstrap_remove_pending_kms [key-id-or-arn]
+bootstrap_remove_pending_kms() {
+  local key_override="${1:-${BOOTSTRAP_KMS_KEY_ARN:-${TF_STATE_KMS_KEY_ARN:-}}}" key_id kms_alias bucket
+
+  tf_common_vars
+  kms_alias="$(bootstrap_kms_alias_name)"
+  bucket="$(bootstrap_state_bucket_name)"
+
+  if [ -z "${key_override}" ]; then
+    key_override="$(bootstrap_discover_pending_bootstrap_kms_key 2>/dev/null || true)"
+  fi
+  if [ -z "${key_override}" ]; then
+    echo "::error::Pass key ARN/ID: bootstrap_remove_pending_kms arn:aws:kms:...:key/..." >&2
+    return 1
+  fi
+
+  echo "Step 1/4: Re-enable KMS key (required to delete encrypted S3 state objects)..."
+  bootstrap_recover_kms "${key_override}" || return 1
+
+  key_id="$(bootstrap_resolve_kms_key_id)"
+
+  if bootstrap_state_bucket_exists; then
+    echo "Step 2/4: Empty state bucket ${bucket} (all versions)..."
+    bootstrap_empty_state_bucket_all_versions "${bucket}"
+    clear_s3_state_lockfiles "${bucket}"
+  fi
+
+  echo "Step 3/4: Delete alias ${kms_alias} (if present)..."
+  if bootstrap_kms_alias_exists; then
+    aws kms delete-alias --alias-name "${kms_alias}" --region "${AWS_REGION}"
+  fi
+
+  echo "Step 4/4: Schedule KMS key ${key_id} for deletion (10 day window)..."
+  aws kms schedule-key-deletion \
+    --key-id "${key_id}" \
+    --pending-window-in-days 10 \
+    --region "${AWS_REGION}"
+  echo "KMS key ${key_id} is PendingDeletion. Bucket should be gone; key deletes after waiting period."
 }
 
 # Delete every version/delete-marker for one exact S3 object key.
