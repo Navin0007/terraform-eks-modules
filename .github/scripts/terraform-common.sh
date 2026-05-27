@@ -306,6 +306,155 @@ bootstrap_kms_key_id_from_state_bucket() {
   aws kms describe-key --key-id "${kms_master}" --query 'KeyMetadata.KeyId' --output text 2>/dev/null
 }
 
+# Resolve bootstrap KMS key ID from alias, env, or bucket default encryption.
+bootstrap_resolve_kms_key_id() {
+  local key_id kms_alias
+
+  if [ -n "${TF_BACKEND_KMS_KEY_ID:-}" ]; then
+    printf '%s\n' "${TF_BACKEND_KMS_KEY_ID}"
+    return 0
+  fi
+  if [ -n "${TF_STATE_KMS_KEY_ID:-}" ]; then
+    printf '%s\n' "${TF_STATE_KMS_KEY_ID}"
+    return 0
+  fi
+  kms_alias="$(bootstrap_kms_alias_name)"
+  if bootstrap_kms_alias_exists; then
+    aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text
+    return 0
+  fi
+  bootstrap_kms_key_id_from_state_bucket
+}
+
+# Cancel scheduled KMS deletion so S3 state read/write works during destroy.
+bootstrap_cancel_kms_pending_deletion() {
+  local key_id state
+
+  if ! key_id="$(bootstrap_resolve_kms_key_id 2>/dev/null)"; then
+    echo "No bootstrap KMS key found to check for pending deletion."
+    return 0
+  fi
+
+  state="$(aws kms describe-key --key-id "${key_id}" \
+    --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+  if [ "${state}" != "PendingDeletion" ]; then
+    echo "Bootstrap KMS key ${key_id} state: ${state:-unknown}"
+    return 0
+  fi
+
+  echo "Cancelling KMS key pending deletion: ${key_id}"
+  aws kms cancel-key-deletion --key-id "${key_id}" --region "${AWS_REGION}" >/dev/null
+  local attempt=0
+  while [ "${attempt}" -lt 30 ]; do
+    state="$(aws kms describe-key --key-id "${key_id}" \
+      --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+    if [ "${state}" = "Enabled" ]; then
+      echo "Bootstrap KMS key ${key_id} is Enabled again."
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+  echo "::warning::KMS key ${key_id} not Enabled after cancel (state=${state})." >&2
+  return 1
+}
+
+# Delete every version/delete-marker for one exact S3 object key.
+bootstrap_delete_s3_object_all_versions() {
+  local bucket="$1" object_key="$2"
+  local version_id
+
+  while read -r version_id; do
+    [ -z "${version_id}" ] || [ "${version_id}" = "None" ] && continue
+    aws s3api delete-object \
+      --bucket "${bucket}" \
+      --key "${object_key}" \
+      --version-id "${version_id}" \
+      --region "${AWS_REGION}" >/dev/null 2>&1 || true
+  done < <(aws s3api list-object-versions \
+    --bucket "${bucket}" \
+    --prefix "${object_key}" \
+    --region "${AWS_REGION}" \
+    --query "Versions[?Key=='${object_key}'].VersionId" \
+    --output text 2>/dev/null | tr '\t' '\n')
+
+  while read -r version_id; do
+    [ -z "${version_id}" ] || [ "${version_id}" = "None" ] && continue
+    aws s3api delete-object \
+      --bucket "${bucket}" \
+      --key "${object_key}" \
+      --version-id "${version_id}" \
+      --region "${AWS_REGION}" >/dev/null 2>&1 || true
+  done < <(aws s3api list-object-versions \
+    --bucket "${bucket}" \
+    --prefix "${object_key}" \
+    --region "${AWS_REGION}" \
+    --query "DeleteMarkers[?Key=='${object_key}'].VersionId" \
+    --output text 2>/dev/null | tr '\t' '\n')
+}
+
+# Empty a versioned state bucket (required when force_destroy cannot complete).
+bootstrap_empty_state_bucket_all_versions() {
+  local bucket="$1" key version_id deleted=0
+
+  if ! aws s3api head-bucket --bucket "${bucket}" --region "${AWS_REGION}" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "Deleting all object versions from s3://${bucket}..."
+  while read -r key version_id; do
+    [ -z "${key}" ] && continue
+    aws s3api delete-object \
+      --bucket "${bucket}" \
+      --key "${key}" \
+      --version-id "${version_id}" \
+      --region "${AWS_REGION}" >/dev/null 2>&1 || true
+    deleted=$((deleted + 1))
+  done < <(aws s3api list-object-versions \
+    --bucket "${bucket}" \
+    --region "${AWS_REGION}" \
+    --output text \
+    --query 'Versions[].[Key,VersionId]' 2>/dev/null)
+
+  while read -r key version_id; do
+    [ -z "${key}" ] && continue
+    aws s3api delete-object \
+      --bucket "${bucket}" \
+      --key "${key}" \
+      --version-id "${version_id}" \
+      --region "${AWS_REGION}" >/dev/null 2>&1 || true
+    deleted=$((deleted + 1))
+  done < <(aws s3api list-object-versions \
+    --bucket "${bucket}" \
+    --region "${AWS_REGION}" \
+    --output text \
+    --query 'DeleteMarkers[].[Key,VersionId]' 2>/dev/null)
+
+  echo "Removed ${deleted} versioned object(s) from ${bucket}."
+}
+
+# S3 native lockfiles (use_lockfile=true); separate from legacy DynamoDB lock rows.
+clear_s3_state_lockfiles() {
+  local bucket="${1:-}"
+  local state_key
+
+  if [ -z "${bucket}" ]; then
+    resolve_bootstrap_backend_env "$(bootstrap_dir_abs global/bootstrap)" || return 0
+    bucket="${TF_BACKEND_BUCKET}"
+  fi
+  if ! aws s3api head-bucket --bucket "${bucket}" --region "${AWS_REGION}" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "Removing S3 state lockfiles from ${bucket}..."
+  for state_key in \
+    "global/bootstrap/terraform.tfstate" \
+    "global/policies/terraform.tfstate" \
+    "dev/terraform.tfstate"; do
+    bootstrap_delete_s3_object_all_versions "${bucket}" "${state_key}.tflock"
+  done
+}
+
 bootstrap_s3_bucket_versioning_exists() {
   local bucket="$1"
   local status
@@ -1492,9 +1641,11 @@ ensure_remote_state_object_exists() {
 repair_remote_state_backend_for_destroy() {
   local table bucket state_key
 
+  bootstrap_cancel_kms_pending_deletion || true
   resolve_bootstrap_backend_env "$(bootstrap_dir_abs global/bootstrap)"
   table="${TF_BACKEND_DYNAMODB_TABLE}"
   bucket="${TF_BACKEND_BUCKET}"
+  clear_s3_state_lockfiles "${bucket}"
   clear_terraform_state_lock_table
 
   for state_key in \
@@ -1518,19 +1669,91 @@ remove_downstream_remote_state_keys() {
   fi
 
   echo "Removing dev/policies state objects from ${bucket} (bootstrap state kept for destroy)..."
-  aws s3 rm "s3://${bucket}/dev/terraform.tfstate" --region "${AWS_REGION}" 2>/dev/null || true
-  aws s3 rm "s3://${bucket}/global/policies/terraform.tfstate" --region "${AWS_REGION}" 2>/dev/null || true
+  bootstrap_delete_s3_object_all_versions "${bucket}" "dev/terraform.tfstate"
+  bootstrap_delete_s3_object_all_versions "${bucket}" "global/policies/terraform.tfstate"
+  bootstrap_delete_s3_object_all_versions "${bucket}" "dev/terraform.tfstate.tflock"
+  bootstrap_delete_s3_object_all_versions "${bucket}" "global/policies/terraform.tfstate.tflock"
   delete_terraform_state_lock_records "${bucket}" "dev/terraform.tfstate" "${TF_BACKEND_DYNAMODB_TABLE}"
   delete_terraform_state_lock_records "${bucket}" "global/policies/terraform.tfstate" "${TF_BACKEND_DYNAMODB_TABLE}"
+  clear_s3_state_lockfiles "${bucket}"
 }
 
 prepare_bootstrap_destroy() {
   local bootstrap_abs
   bootstrap_abs="$(bootstrap_dir_abs global/bootstrap)"
+  bootstrap_cancel_kms_pending_deletion || true
   repair_remote_state_backend_for_destroy
   bootstrap_init "${bootstrap_abs}"
   echo "Importing bootstrap resources into state (recovery after partial destroy)..."
   import_existing_bootstrap_resources "${bootstrap_abs}"
+}
+
+# Destroy bootstrap with safe ordering: cancel KMS deletion, drop dependents, then bucket/KMS.
+bootstrap_terraform_destroy() {
+  local bootstrap_dir="${1:-global/bootstrap}"
+  local bootstrap_abs bucket rc
+  bootstrap_abs="$(bootstrap_dir_abs "${bootstrap_dir}")"
+  bucket="$(bootstrap_state_bucket_name)"
+
+  bootstrap_cancel_kms_pending_deletion || true
+  clear_s3_state_lockfiles "${bucket}"
+
+  pushd "${bootstrap_abs}" >/dev/null
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t destroy_args < <(bootstrap_destroy_var_args)
+  mapfile -t state_args < <(bootstrap_local_state_args)
+
+  for target in \
+    aws_dynamodb_table.terraform_state_lock \
+    aws_s3_bucket_versioning.terraform_state \
+    aws_s3_bucket_server_side_encryption_configuration.terraform_state \
+    aws_s3_bucket_public_access_block.terraform_state; do
+    echo "Destroying ${target} before bucket/KMS..."
+    terraform destroy -input=false -auto-approve -no-color \
+      -target="${target}" \
+      "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}" || true
+  done
+
+  bootstrap_cancel_kms_pending_deletion || true
+
+  terraform destroy -input=false -auto-approve -no-color \
+    "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}"
+  rc=$?
+
+  if [ "${rc}" -ne 0 ]; then
+    echo "::warning::Bootstrap destroy failed (exit ${rc}); attempting KMS recovery and bucket cleanup."
+    bootstrap_cancel_kms_pending_deletion || true
+    clear_s3_state_lockfiles "${bucket}"
+    if bootstrap_state_bucket_exists; then
+      bootstrap_empty_state_bucket_all_versions "${bucket}"
+      bootstrap_cancel_kms_pending_deletion || true
+      terraform destroy -input=false -auto-approve -no-color \
+        "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}" || rc=$?
+    fi
+  fi
+
+  popd >/dev/null
+  return "${rc}"
+}
+
+# Final cleanup when bucket or KMS alias remain after destroy.
+bootstrap_post_destroy_cleanup() {
+  local bucket kms_alias
+
+  bootstrap_cancel_kms_pending_deletion || true
+  bucket="$(bootstrap_state_bucket_name)"
+  if bootstrap_state_bucket_exists; then
+    echo "State bucket still exists; removing all versioned objects..."
+    bootstrap_empty_state_bucket_all_versions "${bucket}"
+    aws s3api delete-bucket --bucket "${bucket}" --region "${AWS_REGION}" 2>/dev/null \
+      && echo "Deleted bucket ${bucket}." \
+      || echo "::warning::Could not delete bucket ${bucket}; delete manually." >&2
+  fi
+  kms_alias="$(bootstrap_kms_alias_name)"
+  if bootstrap_kms_alias_exists; then
+    aws kms delete-alias --alias-name "${kms_alias}" --region "${AWS_REGION}" 2>/dev/null || true
+  fi
+  bootstrap_cancel_kms_pending_deletion || true
 }
 
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).
