@@ -143,6 +143,16 @@ bootstrap_remove_pending_kms arn:aws:kms:REGION:ACCOUNT:key/KEY-ID
 
 That re-enables the key briefly, empties the versioned state bucket, deletes the alias, and schedules the key for deletion again.
 
+### Full teardown in CI
+
+Destroy with workflow **target** `all` or `global/bootstrap`. The job runs `bootstrap_finish_teardown`, which:
+
+1. Recovers KMS if it is `PendingDeletion` (and recreates the alias)
+2. Destroys DynamoDB/S3 auxiliary resources while remote state still works
+3. Empties the versioned state bucket and switches to **local state**
+4. Runs final `terraform destroy` for bucket/KMS without writing state back to S3
+5. Post-cleanup deletes any remaining bucket objects, alias, and schedules KMS deletion
+
 ## GitHub Actions
 
 The workflow [`.github/workflows/terraform.yml`](../../.github/workflows/terraform.yml) runs on pull requests and pushes that change Terraform files.

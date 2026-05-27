@@ -326,15 +326,8 @@ jobs:
           source .github/scripts/terraform-common.sh
           remove_downstream_remote_state_keys
 
-      - name: Bootstrap destroy
+      - name: Bootstrap finish teardown
         if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
         run: |
           source .github/scripts/terraform-common.sh
-          prepare_bootstrap_destroy
-          bootstrap_terraform_destroy global/bootstrap
-
-      - name: Bootstrap post-destroy cleanup
-        if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'global/bootstrap')
-        run: |
-          source .github/scripts/terraform-common.sh
-          bootstrap_post_destroy_cleanup
+          bootstrap_finish_teardown global/bootstrap

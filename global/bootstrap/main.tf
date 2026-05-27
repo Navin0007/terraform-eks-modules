@@ -97,6 +97,11 @@ resource "aws_kms_key" "terraform_state" {
 resource "aws_kms_alias" "terraform_state" {
   name          = local.kms_alias_name
   target_key_id = aws_kms_key.terraform_state.key_id
+
+  # Destroy alias before the CMK; bucket must be empty before key deletion is scheduled.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_s3_bucket" "terraform_state" {

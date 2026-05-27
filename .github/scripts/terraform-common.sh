@@ -487,6 +487,52 @@ bootstrap_recover_kms() {
   echo "Next: bootstrap_init global/bootstrap  (or re-run the Terraform workflow)"
 }
 
+# Fail destroy when bootstrap KMS cannot be re-enabled (pending deletion with no discoverable key).
+bootstrap_recover_kms_required() {
+  if bootstrap_recover_kms; then
+    return 0
+  fi
+  echo "::error::Bootstrap KMS must be Enabled before teardown (cancel PendingDeletion or set BOOTSTRAP_KMS_KEY_ARN)." >&2
+  return 1
+}
+
+# Pull remote state, empty the versioned bucket, and use local state for the final destroy (no S3 writes).
+bootstrap_switch_to_local_state_for_teardown() {
+  local bootstrap_dir="${1:-global/bootstrap}"
+  local bootstrap_abs bucket
+
+  bootstrap_abs="$(bootstrap_dir_abs "${bootstrap_dir}")"
+  bucket="$(bootstrap_state_bucket_name)"
+  bootstrap_recover_kms_required || return 1
+
+  pushd "${bootstrap_abs}" >/dev/null
+  echo "Pulling bootstrap state from S3 before bucket teardown..."
+  if ! terraform state pull >terraform.tfstate.teardown 2>/dev/null; then
+    if [ -f terraform.tfstate ]; then
+      cp terraform.tfstate terraform.tfstate.teardown
+    else
+      echo "::warning::Could not pull remote state; final destroy uses current workspace state." >&2
+      : >terraform.tfstate.teardown
+    fi
+  fi
+
+  popd >/dev/null
+
+  if bootstrap_state_bucket_exists; then
+    echo "Emptying state bucket ${bucket} (all object versions and lockfiles)..."
+    bootstrap_empty_state_bucket_all_versions "${bucket}"
+    clear_s3_state_lockfiles "${bucket}"
+  fi
+
+  pushd "${bootstrap_abs}" >/dev/null
+  echo "Switching to local backend for final bootstrap destroy (prevents state writes to S3/KMS)..."
+  terraform init -input=false -backend=false -reconfigure
+  if [ -s terraform.tfstate.teardown ]; then
+    mv terraform.tfstate.teardown terraform.tfstate
+  fi
+  popd >/dev/null
+}
+
 # Tear down bootstrap KMS: cancel pending deletion, empty state bucket, delete alias, schedule key deletion.
 # Usage: bootstrap_remove_pending_kms [key-id-or-arn]
 bootstrap_remove_pending_kms() {
@@ -1846,6 +1892,7 @@ repair_remote_state_backend_for_destroy() {
 
 # After dev/policies destroy, drop their state objects so bootstrap can delete the bucket.
 remove_downstream_remote_state_keys() {
+  bootstrap_recover_kms || true
   resolve_bootstrap_backend_env "$(bootstrap_dir_abs global/bootstrap)" || return 0
   local bucket="${TF_BACKEND_BUCKET}"
 
@@ -1853,7 +1900,7 @@ remove_downstream_remote_state_keys() {
     return 0
   fi
 
-  echo "Removing dev/policies state objects from ${bucket} (bootstrap state kept for destroy)..."
+  echo "Removing dev/policies state objects from ${bucket} (bootstrap state kept until bootstrap teardown)..."
   bootstrap_delete_s3_object_all_versions "${bucket}" "dev/terraform.tfstate"
   bootstrap_delete_s3_object_all_versions "${bucket}" "global/policies/terraform.tfstate"
   bootstrap_delete_s3_object_all_versions "${bucket}" "dev/terraform.tfstate.tflock"
@@ -1866,27 +1913,26 @@ remove_downstream_remote_state_keys() {
 prepare_bootstrap_destroy() {
   local bootstrap_abs
   bootstrap_abs="$(bootstrap_dir_abs global/bootstrap)"
-  bootstrap_recover_kms || true
+  bootstrap_recover_kms_required || return 1
   repair_remote_state_backend_for_destroy
   bootstrap_init "${bootstrap_abs}"
   echo "Importing bootstrap resources into state (recovery after partial destroy)..."
   import_existing_bootstrap_resources "${bootstrap_abs}"
 }
 
-# Destroy bootstrap with safe ordering: cancel KMS deletion, drop dependents, then bucket/KMS.
+# Destroy bootstrap with safe ordering: dependents first, empty bucket, local state, then bucket/KMS.
 bootstrap_terraform_destroy() {
   local bootstrap_dir="${1:-global/bootstrap}"
   local bootstrap_abs bucket rc
   bootstrap_abs="$(bootstrap_dir_abs "${bootstrap_dir}")"
   bucket="$(bootstrap_state_bucket_name)"
 
-  bootstrap_recover_kms || true
+  bootstrap_recover_kms_required || return 1
   clear_s3_state_lockfiles "${bucket}"
 
   pushd "${bootstrap_abs}" >/dev/null
   mapfile -t var_args < <(tf_var_args)
   mapfile -t destroy_args < <(bootstrap_destroy_var_args)
-  mapfile -t state_args < <(bootstrap_local_state_args)
 
   for target in \
     aws_dynamodb_table.terraform_state_lock \
@@ -1896,48 +1942,81 @@ bootstrap_terraform_destroy() {
     echo "Destroying ${target} before bucket/KMS..."
     terraform destroy -input=false -auto-approve -no-color \
       -target="${target}" \
-      "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}" || true
+      "${var_args[@]}" "${destroy_args[@]}" || true
   done
 
-  bootstrap_recover_kms || true
+  bootstrap_recover_kms_required || return 1
+  popd >/dev/null
 
+  bootstrap_switch_to_local_state_for_teardown "${bootstrap_dir}" || return 1
+
+  pushd "${bootstrap_abs}" >/dev/null
+  echo "Final bootstrap destroy from local state (bucket empty, no remote state writes)..."
   terraform destroy -input=false -auto-approve -no-color \
-    "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}"
+    "${var_args[@]}" "${destroy_args[@]}"
   rc=$?
-
-  if [ "${rc}" -ne 0 ]; then
-    echo "::warning::Bootstrap destroy failed (exit ${rc}); attempting KMS recovery and bucket cleanup."
-    bootstrap_recover_kms || true
-    clear_s3_state_lockfiles "${bucket}"
-    if bootstrap_state_bucket_exists; then
-      bootstrap_empty_state_bucket_all_versions "${bucket}"
-      bootstrap_recover_kms || true
-      terraform destroy -input=false -auto-approve -no-color \
-        "${state_args[@]}" "${var_args[@]}" "${destroy_args[@]}" || rc=$?
-    fi
-  fi
-
   popd >/dev/null
   return "${rc}"
 }
 
-# Final cleanup when bucket or KMS alias remain after destroy.
+# Final cleanup when bucket, alias, or KMS key remain after destroy.
 bootstrap_post_destroy_cleanup() {
-  local bucket kms_alias
+  local bucket kms_alias key_id state
+
+  tf_common_vars
+  bucket="$(bootstrap_state_bucket_name)"
+  kms_alias="$(bootstrap_kms_alias_name)"
 
   bootstrap_recover_kms || true
-  bucket="$(bootstrap_state_bucket_name)"
+
   if bootstrap_state_bucket_exists; then
     echo "State bucket still exists; removing all versioned objects..."
     bootstrap_empty_state_bucket_all_versions "${bucket}"
+    clear_s3_state_lockfiles "${bucket}"
     aws s3api delete-bucket --bucket "${bucket}" --region "${AWS_REGION}" 2>/dev/null \
       && echo "Deleted bucket ${bucket}." \
       || echo "::warning::Could not delete bucket ${bucket}; delete manually." >&2
   fi
-  kms_alias="$(bootstrap_kms_alias_name)"
+
   if bootstrap_kms_alias_exists; then
     aws kms delete-alias --alias-name "${kms_alias}" --region "${AWS_REGION}" 2>/dev/null || true
+    echo "Deleted KMS alias ${kms_alias}."
   fi
+
+  if key_id="$(bootstrap_resolve_kms_key_id 2>/dev/null)"; then
+    state="$(aws kms describe-key --key-id "${key_id}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+    case "${state}" in
+      Enabled)
+        echo "Scheduling KMS key ${key_id} for deletion (10 day window)..."
+        aws kms schedule-key-deletion \
+          --key-id "${key_id}" \
+          --pending-window-in-days 10 \
+          --region "${AWS_REGION}" 2>/dev/null \
+          || echo "::warning::Could not schedule KMS key deletion for ${key_id}." >&2
+        ;;
+      PendingDeletion)
+        echo "KMS key ${key_id} is already PendingDeletion."
+        ;;
+      *)
+        echo "KMS key ${key_id} state: ${state:-unknown}"
+        ;;
+    esac
+  fi
+}
+
+# Full bootstrap teardown for CI: prepare, destroy, post-cleanup.
+bootstrap_finish_teardown() {
+  local bootstrap_dir="${1:-global/bootstrap}"
+
+  prepare_bootstrap_destroy || return 1
+  bootstrap_terraform_destroy "${bootstrap_dir}" || {
+    echo "::warning::Terraform destroy failed; running post-destroy cleanup..."
+    bootstrap_post_destroy_cleanup
+    return 1
+  }
+  bootstrap_post_destroy_cleanup
 }
 
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).
