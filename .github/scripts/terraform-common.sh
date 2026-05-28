@@ -1289,6 +1289,7 @@ bootstrap_run_apply() {
 import_existing_bootstrap_resources() {
   local bootstrap_dir
   local use_remote_backend="false"
+  local local_state_mode="false"
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   tf_common_vars
 
@@ -1307,24 +1308,35 @@ import_existing_bootstrap_resources() {
   pushd "${bootstrap_dir}" >/dev/null
   if [ "${use_remote_backend}" != "true" ]; then
     terraform init -input=false -backend=false -reconfigure
+    local_state_mode="true"
   fi
   mapfile -t var_args < <(tf_var_args)
   mapfile -t state_args < <(bootstrap_local_state_args)
 
   terraform_state_has() {
-    terraform state show -no-color "${state_args[@]}" "$1" &>/dev/null
+    local addr="$1"
+    local -a show_state_args=("${state_args[@]}")
+    if [ "${local_state_mode}" = "true" ]; then
+      show_state_args=("-state=terraform.tfstate")
+    fi
+    terraform state show -no-color "${show_state_args[@]}" "${addr}" &>/dev/null
   }
 
   import_if_missing() {
     local addr="$1"
     local id="$2"
+    local -a import_state_args=("${state_args[@]}")
 
     if terraform_state_has "${addr}"; then
       return 0
     fi
 
+    if [ "${local_state_mode}" = "true" ]; then
+      import_state_args=("-state=terraform.tfstate")
+    fi
+
     echo "Importing existing bootstrap resource ${addr}..."
-    terraform import -input=false "${state_args[@]}" "${var_args[@]}" "${addr}" "${id}"
+    terraform import -input=false "${import_state_args[@]}" "${var_args[@]}" "${addr}" "${id}"
   }
 
   local key_id=""
