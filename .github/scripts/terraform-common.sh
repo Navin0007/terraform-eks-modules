@@ -398,9 +398,14 @@ bootstrap_discover_pending_bootstrap_kms_key() {
   bootstrap_discover_unusable_bootstrap_kms_key
 }
 
+# When true, do not reuse a dedicated CMK in PendingDeletion (apply creates a new key instead).
+bootstrap_skip_pending_deletion_reuse() {
+  [ "${BOOTSTRAP_FORCE_NEW_KMS_KEY:-false}" = "true" ]
+}
+
 # Resolve a bootstrap-dedicated CMK (alias, bucket SSE, or description scan). Never returns unrelated keys.
 bootstrap_resolve_dedicated_bootstrap_kms_key() {
-  local key_id kms_alias
+  local key_id kms_alias state
 
   kms_alias="$(bootstrap_kms_alias_name)"
 
@@ -423,7 +428,22 @@ bootstrap_resolve_dedicated_bootstrap_kms_key() {
     echo "::warning::State bucket SSE uses ${key_id}, which is not the bootstrap state CMK; not reusing." >&2
   fi
 
-  bootstrap_discover_dedicated_bootstrap_kms_key
+  if key_id="$(bootstrap_discover_dedicated_bootstrap_kms_key 2>/dev/null)"; then
+    state="$(aws kms describe-key --key-id "${key_id}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+    if [ "${state}" = "PendingDeletion" ] && bootstrap_skip_pending_deletion_reuse; then
+      echo "Dedicated bootstrap CMK ${key_id} is PendingDeletion; BOOTSTRAP_FORCE_NEW_KMS_KEY=true — apply will create a new CMK." >&2
+      return 1
+    fi
+    if [ "${state}" = "PendingDeletion" ]; then
+      echo "Dedicated bootstrap CMK ${key_id} is PendingDeletion (description matches); will cancel deletion and reuse." >&2
+    fi
+    printf '%s\n' "${key_id}"
+    return 0
+  fi
+
+  return 1
 }
 
 # Wait until KMS key reaches Enabled (or fail after timeout).
