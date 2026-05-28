@@ -183,6 +183,31 @@ aws s3api get-public-access-block --bucket my-project-dev-terraform-state-<accou
 
 ---
 
+#### 1h. Apply succeeded but S3 state migration failed (orphan AWS / empty S3 state)
+
+**Symptoms**
+
+- Bootstrap apply created S3, KMS, DynamoDB in AWS.
+- **Migrate bootstrap state to S3** failed; next plan/apply or destroy fails reading state from S3.
+- Or destroy repair uploaded an **empty placeholder** `terraform.tfstate` and Terraform thinks state exists but has no resources.
+
+**Cause**
+
+- Real state never reached S3 (migration failed; CI workspace `terraform.tfstate` was lost).
+- `bootstrap_state_migrated_to_s3` treated any S3 object (including placeholders) as migrated.
+- `TF_STATE_*` repo variables may be set while S3 state is still missing.
+
+**Fix (in repo)**
+
+- Treat placeholder / tiny state objects as **not migrated** (`bootstrap_s3_state_is_placeholder`).
+- **partial_s3** init clears stale placeholder, then **import** rebuilds state from AWS.
+- **maybe_migrate** without local file: S3 init + import instead of `-migrate-state`.
+- Destroy repair no longer writes empty bootstrap state placeholders.
+
+**Recovery:** Re-run **apply → `global/bootstrap`** on latest `main`. Logs should show partial S3 init, import of existing resources, then plan with no (or few) changes.
+
+---
+
 ### 2. Duplicate IAM policies
 
 **What:** Policies already exist errors in dev.

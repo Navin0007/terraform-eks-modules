@@ -278,15 +278,68 @@ bootstrap_state_bucket_exists() {
   aws s3api head-bucket --bucket "${bucket}" &>/dev/null
 }
 
-# True after maybe_migrate_bootstrap_state (or a prior successful apply) uploaded state to S3.
+bootstrap_state_s3_key() {
+  printf '%s\n' "global/bootstrap/terraform.tfstate"
+}
+
+# Empty placeholder written by ensure_remote_state_object_exists (destroy recovery).
+bootstrap_s3_state_is_placeholder() {
+  local bucket="${1:-$(bootstrap_state_bucket_name)}"
+  local key="${2:-$(bootstrap_state_s3_key)}"
+  local tmp size
+
+  if ! aws s3api head-object --bucket "${bucket}" --key "${key}" --region "${AWS_REGION}" &>/dev/null; then
+    return 1
+  fi
+
+  size="$(aws s3api head-object --bucket "${bucket}" --key "${key}" \
+    --region "${AWS_REGION}" --query 'ContentLength' --output text 2>/dev/null || true)"
+  if [ -n "${size}" ] && [ "${size}" -lt 256 ]; then
+    return 0
+  fi
+
+  tmp="$(mktemp)"
+  if ! aws s3 cp "s3://${bucket}/${key}" "${tmp}" --region "${AWS_REGION}" 2>/dev/null; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  if grep -q '"lineage":"destroy-recovery"' "${tmp}" 2>/dev/null \
+    || grep -q '"resources":\[\]' "${tmp}" 2>/dev/null; then
+    rm -f "${tmp}"
+    return 0
+  fi
+  rm -f "${tmp}"
+  return 1
+}
+
+# Remove invalid bootstrap state object so import/plan can repopulate from AWS.
+bootstrap_clear_stale_s3_bootstrap_state() {
+  local bucket key
+  bucket="$(bootstrap_state_bucket_name)"
+  key="$(bootstrap_state_s3_key)"
+
+  if bootstrap_s3_state_is_placeholder "${bucket}" "${key}"; then
+    echo "Removing placeholder bootstrap state at s3://${bucket}/${key}..." >&2
+    aws s3api delete-object --bucket "${bucket}" --key "${key}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if aws s3api head-object --bucket "${bucket}" --key "${key}" --region "${AWS_REGION}" &>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# True when real bootstrap state (not empty placeholder) is in S3.
 bootstrap_state_migrated_to_s3() {
   local bucket
   bucket="$(bootstrap_state_bucket_name)"
   bootstrap_state_bucket_exists \
     && aws s3api head-object \
       --bucket "${bucket}" \
-      --key "global/bootstrap/terraform.tfstate" \
-      --region "${AWS_REGION}" &>/dev/null
+      --key "$(bootstrap_state_s3_key)" \
+      --region "${AWS_REGION}" &>/dev/null \
+    && ! bootstrap_s3_state_is_placeholder "${bucket}" "$(bootstrap_state_s3_key)"
 }
 
 bootstrap_dynamodb_table_name() {
@@ -391,6 +444,7 @@ bootstrap_init_partial_s3() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   echo "Bootstrap init: partial S3 backend (bucket exists; configuring S3 for import/plan/apply)." >&2
+  bootstrap_clear_stale_s3_bootstrap_state || true
   bootstrap_restore_s3_backend_file "${bootstrap_dir}"
   pushd "${bootstrap_dir}" >/dev/null
   bootstrap_set_backend_for_existing_bucket
@@ -1168,20 +1222,24 @@ resolve_bootstrap_backend_env() {
 
   if [ -n "${TF_STATE_BUCKET:-}" ] \
     && [ -n "${TF_STATE_DYNAMODB_TABLE:-}" ]; then
-    export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
-    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
-    export TF_BACKEND_REGION="${AWS_REGION}"
-    if [ -n "${TF_STATE_KMS_KEY_ID:-}" ] \
-      && [ "$(bootstrap_kms_key_state "${TF_STATE_KMS_KEY_ID}")" = "Enabled" ] \
-      && bootstrap_is_dedicated_bootstrap_kms_key "${TF_STATE_KMS_KEY_ID}"; then
-      export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
-      export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN:-}"
+    if ! bootstrap_state_migrated_to_s3; then
+      echo "::warning::TF_STATE_* variables are set but bootstrap state is missing or placeholder in S3; using recovery init." >&2
     else
-      unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
-      echo "::warning::Repository KMS variables point to a non-reusable key; omitting kms_key_id from backend init." >&2
+      export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
+      export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
+      export TF_BACKEND_REGION="${AWS_REGION}"
+      if [ -n "${TF_STATE_KMS_KEY_ID:-}" ] \
+        && [ "$(bootstrap_kms_key_state "${TF_STATE_KMS_KEY_ID}")" = "Enabled" ] \
+        && bootstrap_is_dedicated_bootstrap_kms_key "${TF_STATE_KMS_KEY_ID}"; then
+        export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
+        export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN:-}"
+      else
+        unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
+        echo "::warning::Repository KMS variables point to a non-reusable key; omitting kms_key_id from backend init." >&2
+      fi
+      echo "Using bootstrap backend from repository variables."
+      return 0
     fi
-    echo "Using bootstrap backend from repository variables."
-    return 0
   fi
 
   if bootstrap_remote_backend_ready; then
@@ -1271,12 +1329,27 @@ maybe_migrate_bootstrap_state() {
     return 0
   fi
 
-  export_bootstrap_outputs "${bootstrap_dir}"
+  bootstrap_clear_stale_s3_bootstrap_state || true
+
+  if [ -f "${bootstrap_dir}/terraform.tfstate" ]; then
+    export_bootstrap_outputs "${bootstrap_dir}"
+    bootstrap_restore_s3_backend_file "${bootstrap_dir}"
+    pushd "${bootstrap_dir}" >/dev/null
+    export TF_BACKEND_KEY="$(bootstrap_state_s3_key)"
+    bootstrap_terraform_init_s3 migrate
+    popd >/dev/null
+    bootstrap_enable_state_locking "${bootstrap_dir}"
+    return 0
+  fi
+
+  echo "::warning::No local terraform.tfstate; recovering bootstrap state via S3 import." >&2
   bootstrap_restore_s3_backend_file "${bootstrap_dir}"
+  bootstrap_set_backend_for_existing_bucket
   pushd "${bootstrap_dir}" >/dev/null
-  export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
-  bootstrap_terraform_init_s3 migrate
+  export TF_BACKEND_KEY="$(bootstrap_state_s3_key)"
+  bootstrap_terraform_init_s3
   popd >/dev/null
+  import_existing_bootstrap_resources "${bootstrap_dir}"
   bootstrap_enable_state_locking "${bootstrap_dir}"
 }
 
@@ -1287,6 +1360,10 @@ bootstrap_apply_backend_env_from_repo_vars() {
   fi
   if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" --region "${AWS_REGION}" 2>/dev/null; then
     echo "::warning::TF_STATE_BUCKET=${TF_STATE_BUCKET} is not reachable; falling back to local bootstrap init." >&2
+    return 1
+  fi
+  if ! bootstrap_state_migrated_to_s3; then
+    echo "::warning::TF_STATE_BUCKET is set but bootstrap state is not in S3 yet; falling back to recovery init." >&2
     return 1
   fi
 
@@ -2305,7 +2382,12 @@ repair_remote_state_backend_for_destroy() {
     "global/bootstrap/terraform.tfstate" \
     "global/policies/terraform.tfstate" \
     "dev/terraform.tfstate"; do
-    ensure_remote_state_object_exists "${state_key}" || true
+    if [ "${state_key}" = "$(bootstrap_state_s3_key)" ]; then
+      bootstrap_clear_stale_s3_bootstrap_state || true
+      # Do not upload an empty placeholder for bootstrap; prepare_bootstrap_destroy imports real resources.
+    else
+      ensure_remote_state_object_exists "${state_key}" || true
+    fi
     if aws s3api head-object --bucket "${bucket}" --key "${state_key}" --region "${AWS_REGION}" &>/dev/null; then
       sync_terraform_state_digest_from_s3 "${bucket}" "${state_key}" "${table}" || true
     fi
