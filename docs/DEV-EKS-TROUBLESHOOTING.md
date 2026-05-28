@@ -59,12 +59,13 @@ Occurs on `import_existing_bootstrap_resources` after `terraform init -backend=f
 
 **Cause**
 
-Terraform **1.7+** requires a configured S3 backend for `import` / `plan` / `apply` when `backend "s3"` is declared in `backend.tf`. Local-only init (`-backend=false`) is not enough once the state bucket already exists in AWS.
+Terraform **1.7+** requires a configured S3 backend for `import` / `plan` / `apply` when `backend "s3"` is declared in `backend.tf`. Local-only init (`-backend=false`) works only while the state bucket **does not exist** in AWS. If the bucket exists (partial bootstrap), `terraform import` fails after local init.
 
 **Fix (in repo)**
 
-- When the state bucket exists, run `terraform init -reconfigure` with S3 `-backend-config=...` (discover KMS from alias or bucket default encryption).
-- Do **not** pass deprecated `-state=terraform.tfstate` on import/plan/apply.
+- `bootstrap_init_mode`: **local** when no bucket; **partial_s3** when bucket exists but state object is not in S3 yet; **remote** after migration.
+- Partial S3 init uses `bootstrap_set_backend_for_existing_bucket` (omits `kms_key_id` / DynamoDB until they exist).
+- Use `-state=terraform.tfstate` only in **local** mode (no bucket yet).
 
 **Reference:** `global/bootstrap/backend.tf`; `.github/scripts/terraform-common.sh` — `bootstrap_init`, `import_existing_bootstrap_resources` (~L507–L607).
 
@@ -165,7 +166,7 @@ KMS **key** and KMS **alias** are separate. Bootstrap is not complete until the 
 **Steps**
 
 1. Run **Actions → Terraform → apply → `global/bootstrap`** on latest `main`.
-2. Confirm in logs: S3 backend init (no DynamoDB lock until table exists) → import bucket only → apply creates missing resources → `bootstrap_enable_state_locking`.
+2. Confirm in logs: **partial S3** init when bucket exists (or **local** if bucket missing) → import existing resources → apply creates missing → migrate or `bootstrap_enable_state_locking`.
 3. Save printed `TF_STATE_*` repo variables.
 4. Run **policies**, then **dev**.
 

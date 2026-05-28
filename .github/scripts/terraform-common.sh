@@ -312,18 +312,45 @@ bootstrap_remote_backend_ready() {
   bootstrap_state_bucket_exists && bootstrap_kms_alias_exists
 }
 
-# Import/plan/apply use local state until bootstrap state is in S3 (then remote backend).
+# Terraform 1.7+ init mode for bootstrap (backend "s3" is declared in backend.tf):
+#   local      — no state bucket in AWS yet; -backend=false, state on disk until migrate
+#   partial_s3 — bucket exists but state object not in S3; must init S3 for import/plan/apply
+#   remote     — state object already in S3
+bootstrap_init_mode() {
+  if bootstrap_state_migrated_to_s3; then
+    printf '%s\n' remote
+  elif bootstrap_state_bucket_exists; then
+    printf '%s\n' partial_s3
+  else
+    printf '%s\n' local
+  fi
+}
+
 bootstrap_uses_local_state() {
-  ! bootstrap_state_migrated_to_s3
+  [ "$(bootstrap_init_mode)" = local ]
+}
+
+bootstrap_uses_partial_s3_backend() {
+  [ "$(bootstrap_init_mode)" = partial_s3 ]
 }
 
 bootstrap_init_local() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
-  echo "Bootstrap init: local state (S3 state object not present yet)."
+  echo "Bootstrap init: local state (state bucket does not exist yet)."
   pushd "${bootstrap_dir}" >/dev/null
   rm -rf .terraform
   terraform init -input=false -backend=false -reconfigure
+  popd >/dev/null
+}
+
+bootstrap_init_partial_s3() {
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
+  echo "Bootstrap init: partial S3 backend (bucket exists; configuring S3 for import/plan/apply)." >&2
+  pushd "${bootstrap_dir}" >/dev/null
+  bootstrap_set_backend_for_existing_bucket
+  bootstrap_terraform_init_s3
   popd >/dev/null
 }
 
@@ -1265,19 +1292,29 @@ bootstrap_resolve_s3_backend_env() {
 }
 
 bootstrap_init() {
-  local bootstrap_dir
+  local bootstrap_dir mode
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
+  mode="$(bootstrap_init_mode)"
 
-  if bootstrap_uses_local_state; then
-    bootstrap_init_local "${bootstrap_dir}"
-    return 0
-  fi
-
-  echo "Bootstrap init: remote S3 backend (state already in bucket)."
-  pushd "$(bootstrap_dir_abs "${bootstrap_dir}")" >/dev/null
-  bootstrap_resolve_s3_backend_env
-  bootstrap_terraform_init_s3
-  popd >/dev/null
+  case "${mode}" in
+    local)
+      bootstrap_init_local "${bootstrap_dir}"
+      ;;
+    partial_s3)
+      bootstrap_init_partial_s3 "${bootstrap_dir}"
+      ;;
+    remote)
+      echo "Bootstrap init: remote S3 backend (state already in bucket)."
+      pushd "${bootstrap_dir}" >/dev/null
+      bootstrap_resolve_s3_backend_env
+      bootstrap_terraform_init_s3
+      popd >/dev/null
+      ;;
+    *)
+      echo "::error::Unknown bootstrap init mode: ${mode}" >&2
+      return 1
+      ;;
+  esac
 }
 
 # Plan/apply in the bootstrap module after backend init (same directory, TF 1.7+).
@@ -1317,12 +1354,20 @@ import_existing_bootstrap_resources() {
   local kms_alias="alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
 
   pushd "${bootstrap_dir}" >/dev/null
-  if bootstrap_uses_local_state; then
-    bootstrap_init_local "${bootstrap_dir}"
-    local_state_mode="true"
-  else
-    bootstrap_init "${bootstrap_dir}"
-  fi
+  case "$(bootstrap_init_mode)" in
+    local)
+      bootstrap_init_local "${bootstrap_dir}"
+      local_state_mode="true"
+      ;;
+    partial_s3)
+      bootstrap_init_partial_s3 "${bootstrap_dir}"
+      local_state_mode="false"
+      ;;
+    remote)
+      bootstrap_init "${bootstrap_dir}"
+      local_state_mode="false"
+      ;;
+  esac
   mapfile -t var_args < <(tf_var_args)
   mapfile -t state_args < <(bootstrap_local_state_args)
 

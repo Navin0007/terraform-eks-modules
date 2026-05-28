@@ -97,7 +97,15 @@ Re-run `terraform plan` after changes; bootstrap updates are rare and should be 
 
 If bootstrap apply fails partway through (or state is lost before S3 migration), AWS resources may already exist while Terraform state does not. Re-running apply then fails with errors such as `ResourceInUseException: Table already exists`.
 
-GitHub Actions uses a **local backend** for bootstrap init, import, plan, and apply until `global/bootstrap/terraform.tfstate` exists in the state bucket (`maybe_migrate_bootstrap_state` uploads it). Until then, `import_existing_bootstrap_resources` imports only resources that exist in AWS into local state; apply creates the rest.
+GitHub Actions picks the init mode from AWS:
+
+| Condition | Init mode |
+|-----------|-----------|
+| State bucket does not exist | **Local** (`-backend=false`); migrate uploads state after apply |
+| Bucket exists, state object not in S3 yet | **Partial S3** (required for Terraform 1.7+ import/plan when `backend "s3"` is declared) |
+| State object already in S3 | **Remote** S3 backend |
+
+`import_existing_bootstrap_resources` imports only resources that exist in AWS; apply creates the rest.
 
 To recover locally:
 
