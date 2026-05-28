@@ -135,6 +135,8 @@ bootstrap_init global/bootstrap
 
 **Alias gone vs key unusable:** destroying bootstrap removes the alias first; the CMK may become `PendingDeletion` (scheduled delete) or `Disabled`. Either state blocks S3 state access (`KMSInvalidStateException` / `KMS.DisabledException`). Run `bootstrap_recover_kms` to enable/cancel deletion and recreate the alias before plan/destroy, or use `bootstrap_finish_teardown` to empty the bucket and complete removal.
 
+**Fresh bootstrap after a failed destroy:** CI runs `bootstrap_prepare_apply` before plan/apply. It finds the orphaned CMK (via bucket SSE or account scan), cancels `PendingDeletion` / enables `Disabled`, recreates the alias, then imports the same key into Terraform state. You do not get a second CMK for the same project/environment unless the old key was fully deleted after the 7-day window.
+
 To **remove** the key and bucket (full teardown after a failed destroy):
 
 ```bash

@@ -528,6 +528,59 @@ bootstrap_recover_kms_required() {
   return 1
 }
 
+# Return 0 when the key must be recovered before bootstrap plan/apply/import.
+bootstrap_kms_key_needs_recovery() {
+  local key_id="$1" state
+
+  [ -n "${key_id}" ] || return 1
+  state="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+  [ "${state}" = "PendingDeletion" ] || [ "${state}" = "Disabled" ]
+}
+
+# Before bootstrap apply/import: recover PendingDeletion/Disabled keys and recreate missing alias.
+bootstrap_reconcile_orphan_kms() {
+  local key_id="" kms_alias
+
+  tf_common_vars
+  kms_alias="$(bootstrap_kms_alias_name)"
+
+  if bootstrap_kms_alias_exists; then
+    key_id="$(aws kms describe-key --key-id "${kms_alias}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyId' --output text)"
+  elif key_id="$(bootstrap_kms_key_id_from_state_bucket 2>/dev/null)"; then
+    echo "Bootstrap KMS resolved from state bucket encryption: ${key_id}" >&2
+  elif key_id="$(bootstrap_discover_unusable_bootstrap_kms_key 2>/dev/null)"; then
+    echo "Bootstrap KMS resolved from orphaned PendingDeletion/Disabled key: ${key_id}" >&2
+  else
+    return 0
+  fi
+
+  if bootstrap_kms_key_needs_recovery "${key_id}"; then
+    echo "Recovering bootstrap KMS key ${key_id} (cancel deletion or enable) before apply..."
+    bootstrap_restore_kms_key_usability "${key_id}" || return 1
+  fi
+
+  if ! bootstrap_kms_alias_exists; then
+    echo "Recreating missing bootstrap KMS alias ${kms_alias}..."
+    bootstrap_ensure_kms_alias || return 1
+  fi
+
+  export TF_BACKEND_KMS_KEY_ID="${key_id}"
+  export TF_STATE_KMS_KEY_ARN
+  TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.Arn' --output text)"
+  return 0
+}
+
+# Run before bootstrap plan/apply in CI or locally.
+bootstrap_prepare_apply() {
+  bootstrap_reconcile_orphan_kms
+}
+
 # Pull remote state, empty the versioned bucket, and use local state for the final destroy (no S3 writes).
 bootstrap_switch_to_local_state_for_teardown() {
   local bootstrap_dir="${1:-global/bootstrap}"
@@ -1013,6 +1066,7 @@ import_existing_bootstrap_resources() {
   tf_common_vars
 
   # Each workflow step is a new shell; re-init so .terraform matches local vs remote backend.
+  bootstrap_reconcile_orphan_kms || true
   bootstrap_init "${bootstrap_dir}"
 
   local name_prefix="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}"
@@ -1040,14 +1094,24 @@ import_existing_bootstrap_resources() {
     terraform import -input=false "${state_args[@]}" "${var_args[@]}" "${addr}" "${id}"
   }
 
+  local key_id=""
   if aws kms describe-key --key-id "${kms_alias}" &>/dev/null; then
-    local key_id
-    key_id="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
+    key_id="$(aws kms describe-key --key-id "${kms_alias}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyId' --output text)"
+  elif key_id="$(bootstrap_kms_key_id_from_state_bucket 2>/dev/null)"; then
+    echo "Importing KMS key from state bucket encryption (alias not found)..." >&2
+  elif key_id="$(bootstrap_discover_unusable_bootstrap_kms_key 2>/dev/null)"; then
+    echo "Importing orphaned bootstrap KMS key (no alias; was PendingDeletion/Disabled)..." >&2
+  fi
+
+  if [ -n "${key_id}" ]; then
+    if bootstrap_kms_key_needs_recovery "${key_id}"; then
+      bootstrap_restore_kms_key_usability "${key_id}" || true
+    fi
+    bootstrap_ensure_kms_alias || true
     import_if_missing aws_kms_key.terraform_state "${key_id}"
     import_if_missing aws_kms_alias.terraform_state "${kms_alias}"
-  elif key_id="$(bootstrap_kms_key_id_from_state_bucket)"; then
-    echo "Importing KMS key from state bucket encryption (alias not created yet)..."
-    import_if_missing aws_kms_key.terraform_state "${key_id}"
   fi
 
   if aws s3api head-bucket --bucket "${state_bucket}" &>/dev/null; then
