@@ -236,7 +236,8 @@ EOF
 # True when terraform init configured the S3 backend (not provider-only init).
 bootstrap_s3_backend_is_configured() {
   [ -f .terraform/terraform.tfstate ] \
-    && grep -qE '"type":\s*"s3"' .terraform/terraform.tfstate 2>/dev/null
+    && grep -qE '"backend"[[:space:]]*:[[:space:]]*\{[[:space:]]*"type"[[:space:]]*:[[:space:]]*"s3"' \
+      .terraform/terraform.tfstate 2>/dev/null
 }
 
 # Full S3 backend init for Terraform 1.7+ (clean .terraform + reconfigure + verify).
