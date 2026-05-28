@@ -335,41 +335,95 @@ bootstrap_resolve_kms_key_id() {
   bootstrap_kms_key_id_from_state_bucket
 }
 
-# Find bootstrap KMS keys that need recovery (PendingDeletion or Disabled).
-bootstrap_discover_unusable_bootstrap_kms_key() {
-  local key_id state desc unusable=0 found_id=""
+# Description string for the bootstrap CMK (must match global/bootstrap/main.tf).
+bootstrap_kms_expected_description() {
+  tf_common_vars
+  printf 'Terraform remote state encryption for %s (%s)' \
+    "${TF_PROJECT_NAME}" "${TF_ENVIRONMENT}"
+}
 
+# True only for CMKs created by this bootstrap module (not other workloads).
+bootstrap_is_dedicated_bootstrap_kms_key() {
+  local key_id="$1" desc expected
+
+  [ -n "${key_id}" ] || return 1
+  expected="$(bootstrap_kms_expected_description)"
+  desc="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.Description' --output text 2>/dev/null || true)"
+  [ "${desc}" = "${expected}" ]
+}
+
+# Find bootstrap CMK by description (any key state).
+bootstrap_discover_dedicated_bootstrap_kms_key() {
+  local key_id desc expected match=""
+
+  expected="$(bootstrap_kms_expected_description)"
   while read -r key_id; do
     [ -z "${key_id}" ] && continue
-    state="$(aws kms describe-key --key-id "${key_id}" \
-      --region "${AWS_REGION}" \
-      --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
-    if [ "${state}" != "PendingDeletion" ] && [ "${state}" != "Disabled" ]; then
-      continue
-    fi
-    unusable=$((unusable + 1))
     desc="$(aws kms describe-key --key-id "${key_id}" \
       --region "${AWS_REGION}" \
       --query 'KeyMetadata.Description' --output text 2>/dev/null || true)"
-    if [[ "${desc}" == *"Terraform remote state encryption for ${TF_PROJECT_NAME} (${TF_ENVIRONMENT})"* ]]; then
-      printf '%s\n' "${key_id}"
-      return 0
+    if [ "${desc}" = "${expected}" ]; then
+      match="${key_id}"
     fi
-    found_id="${key_id}"
   done < <(aws kms list-keys --region "${AWS_REGION}" \
     --query 'Keys[].KeyId' --output text 2>/dev/null | tr '\t' '\n')
 
-  if [ "${unusable}" -eq 1 ] && [ -n "${found_id}" ]; then
-    echo "Using only unusable KMS key in account: ${found_id}" >&2
-    printf '%s\n' "${found_id}"
+  if [ -n "${match}" ]; then
+    printf '%s\n' "${match}"
     return 0
   fi
+  return 1
+}
 
+# Find dedicated bootstrap CMK in PendingDeletion or Disabled only.
+bootstrap_discover_unusable_bootstrap_kms_key() {
+  local key_id state
+
+  if ! key_id="$(bootstrap_discover_dedicated_bootstrap_kms_key 2>/dev/null)"; then
+    return 1
+  fi
+  state="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+  if [ "${state}" = "PendingDeletion" ] || [ "${state}" = "Disabled" ]; then
+    printf '%s\n' "${key_id}"
+    return 0
+  fi
   return 1
 }
 
 bootstrap_discover_pending_bootstrap_kms_key() {
   bootstrap_discover_unusable_bootstrap_kms_key
+}
+
+# Resolve a bootstrap-dedicated CMK (alias, bucket SSE, or description scan). Never returns unrelated keys.
+bootstrap_resolve_dedicated_bootstrap_kms_key() {
+  local key_id kms_alias
+
+  kms_alias="$(bootstrap_kms_alias_name)"
+
+  if bootstrap_kms_alias_exists; then
+    key_id="$(aws kms describe-key --key-id "${kms_alias}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyId' --output text)"
+    if bootstrap_is_dedicated_bootstrap_kms_key "${key_id}"; then
+      printf '%s\n' "${key_id}"
+      return 0
+    fi
+    echo "::warning::Alias ${kms_alias} points to ${key_id}, which is not the bootstrap state CMK; ignoring." >&2
+  fi
+
+  if key_id="$(bootstrap_kms_key_id_from_state_bucket 2>/dev/null)"; then
+    if bootstrap_is_dedicated_bootstrap_kms_key "${key_id}"; then
+      printf '%s\n' "${key_id}"
+      return 0
+    fi
+    echo "::warning::State bucket SSE uses ${key_id}, which is not the bootstrap state CMK; not reusing." >&2
+  fi
+
+  bootstrap_discover_dedicated_bootstrap_kms_key
 }
 
 # Wait until KMS key reaches Enabled (or fail after timeout).
@@ -436,13 +490,18 @@ bootstrap_cancel_kms_pending_deletion() {
   bootstrap_restore_kms_key_usability "$@"
 }
 
-# Recreate bootstrap KMS alias when it was deleted but the key still exists.
+# Recreate bootstrap KMS alias when it was deleted but the dedicated key still exists.
 bootstrap_ensure_kms_alias() {
   local key_id kms_alias target
 
   kms_alias="$(bootstrap_kms_alias_name)"
-  if ! key_id="$(bootstrap_resolve_kms_key_id 2>/dev/null)"; then
-    echo "::error::Cannot resolve bootstrap KMS key ID to attach alias ${kms_alias}." >&2
+  if ! key_id="$(bootstrap_resolve_dedicated_bootstrap_kms_key 2>/dev/null)"; then
+    echo "No bootstrap-dedicated CMK to attach alias ${kms_alias}; apply will create a new key." >&2
+    return 0
+  fi
+
+  if ! bootstrap_is_dedicated_bootstrap_kms_key "${key_id}"; then
+    echo "::error::Refusing to attach bootstrap alias to non-dedicated key ${key_id}." >&2
     return 1
   fi
 
@@ -488,17 +547,26 @@ bootstrap_recover_kms() {
     key_id="$(aws kms describe-key --key-id "${key_override}" \
       --region "${AWS_REGION}" \
       --query 'KeyMetadata.KeyId' --output text)"
+    if ! bootstrap_is_dedicated_bootstrap_kms_key "${key_id}"; then
+      echo "::error::${key_override} is not a bootstrap-dedicated CMK (description mismatch)." >&2
+      return 1
+    fi
     export TF_BACKEND_KMS_KEY_ID="${key_id}"
     export TF_STATE_KMS_KEY_ARN
     TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
       --region "${AWS_REGION}" \
       --query 'KeyMetadata.Arn' --output text)"
+  elif ! key_id="$(bootstrap_resolve_dedicated_bootstrap_kms_key 2>/dev/null)"; then
+    echo "No bootstrap-dedicated CMK to recover."
+    return 0
+  else
+    key_override="${key_id}"
   fi
 
   bootstrap_restore_kms_key_usability "${key_override}" || return 1
   bootstrap_ensure_kms_alias || return 1
 
-  key_id="$(bootstrap_resolve_kms_key_id)"
+  key_id="$(bootstrap_resolve_dedicated_bootstrap_kms_key)"
   export TF_BACKEND_KMS_KEY_ID="${key_id}"
   export TF_STATE_KMS_KEY_ARN
   TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
@@ -539,32 +607,31 @@ bootstrap_kms_key_needs_recovery() {
   [ "${state}" = "PendingDeletion" ] || [ "${state}" = "Disabled" ]
 }
 
-# Before bootstrap apply/import: recover PendingDeletion/Disabled keys and recreate missing alias.
+# Before bootstrap apply/import: reuse only the dedicated CMK; otherwise apply creates a new key.
 bootstrap_reconcile_orphan_kms() {
-  local key_id="" kms_alias
+  local key_id="" kms_alias state
 
   tf_common_vars
   kms_alias="$(bootstrap_kms_alias_name)"
 
-  if bootstrap_kms_alias_exists; then
-    key_id="$(aws kms describe-key --key-id "${kms_alias}" \
-      --region "${AWS_REGION}" \
-      --query 'KeyMetadata.KeyId' --output text)"
-  elif key_id="$(bootstrap_kms_key_id_from_state_bucket 2>/dev/null)"; then
-    echo "Bootstrap KMS resolved from state bucket encryption: ${key_id}" >&2
-  elif key_id="$(bootstrap_discover_unusable_bootstrap_kms_key 2>/dev/null)"; then
-    echo "Bootstrap KMS resolved from orphaned PendingDeletion/Disabled key: ${key_id}" >&2
-  else
+  if ! key_id="$(bootstrap_resolve_dedicated_bootstrap_kms_key 2>/dev/null)"; then
+    echo "No bootstrap-dedicated CMK found; terraform apply will create a new aws_kms_key."
     return 0
   fi
 
+  state="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+
   if bootstrap_kms_key_needs_recovery "${key_id}"; then
-    echo "Recovering bootstrap KMS key ${key_id} (cancel deletion or enable) before apply..."
+    echo "Recovering bootstrap-dedicated CMK ${key_id} (${state}) before apply..."
     bootstrap_restore_kms_key_usability "${key_id}" || return 1
+  elif [ "${state}" = "Enabled" ]; then
+    echo "Using enabled bootstrap-dedicated CMK ${key_id}."
   fi
 
   if ! bootstrap_kms_alias_exists; then
-    echo "Recreating missing bootstrap KMS alias ${kms_alias}..."
+    echo "Attaching bootstrap alias ${kms_alias} to dedicated CMK ${key_id}..."
     bootstrap_ensure_kms_alias || return 1
   fi
 
@@ -1095,23 +1162,16 @@ import_existing_bootstrap_resources() {
   }
 
   local key_id=""
-  if aws kms describe-key --key-id "${kms_alias}" &>/dev/null; then
-    key_id="$(aws kms describe-key --key-id "${kms_alias}" \
-      --region "${AWS_REGION}" \
-      --query 'KeyMetadata.KeyId' --output text)"
-  elif key_id="$(bootstrap_kms_key_id_from_state_bucket 2>/dev/null)"; then
-    echo "Importing KMS key from state bucket encryption (alias not found)..." >&2
-  elif key_id="$(bootstrap_discover_unusable_bootstrap_kms_key 2>/dev/null)"; then
-    echo "Importing orphaned bootstrap KMS key (no alias; was PendingDeletion/Disabled)..." >&2
-  fi
-
-  if [ -n "${key_id}" ]; then
+  if key_id="$(bootstrap_resolve_dedicated_bootstrap_kms_key 2>/dev/null)"; then
+    echo "Importing bootstrap-dedicated CMK ${key_id} into Terraform state..." >&2
     if bootstrap_kms_key_needs_recovery "${key_id}"; then
       bootstrap_restore_kms_key_usability "${key_id}" || true
     fi
     bootstrap_ensure_kms_alias || true
     import_if_missing aws_kms_key.terraform_state "${key_id}"
     import_if_missing aws_kms_alias.terraform_state "${kms_alias}"
+  else
+    echo "No bootstrap-dedicated CMK to import; apply will create aws_kms_key.terraform_state." >&2
   fi
 
   if aws s3api head-bucket --bucket "${state_bucket}" &>/dev/null; then
