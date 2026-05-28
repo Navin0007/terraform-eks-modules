@@ -309,9 +309,13 @@ bootstrap_s3_state_is_placeholder() {
   if [ -n "${size}" ] && [ "${size}" -lt 256 ]; then
     return 0
   fi
+  if [ -n "${size}" ] && [ "${size}" -ge 256 ]; then
+    return 1
+  fi
 
   tmp="$(mktemp)"
-  if ! aws s3 cp "s3://${bucket}/${key}" "${tmp}" --region "${AWS_REGION}" 2>/dev/null; then
+  if ! aws s3 cp "s3://${bucket}/${key}" "${tmp}" \
+    --region "${AWS_REGION}" --only-show-errors >/dev/null 2>&1; then
     rm -f "${tmp}"
     return 1
   fi
@@ -1489,7 +1493,9 @@ import_existing_bootstrap_resources() {
   local kms_alias="alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
 
   pushd "${bootstrap_dir}" >/dev/null
-  case "$(bootstrap_init_mode)" in
+  local init_mode
+  init_mode="$(bootstrap_init_mode)"
+  case "${init_mode}" in
     local)
       bootstrap_init_local "${bootstrap_dir}"
       ;;
@@ -1498,6 +1504,11 @@ import_existing_bootstrap_resources() {
       ;;
     remote)
       bootstrap_init "${bootstrap_dir}"
+      ;;
+    *)
+      echo "::error::Unknown bootstrap init mode: ${init_mode}" >&2
+      popd >/dev/null
+      return 1
       ;;
   esac
   mapfile -t var_args < <(tf_var_args)
