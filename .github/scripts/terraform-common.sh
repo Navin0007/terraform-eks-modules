@@ -679,6 +679,13 @@ bootstrap_reconcile_orphan_kms() {
 # Run before bootstrap plan/apply in CI or locally (never fails; does not cancel deletion or enable keys).
 bootstrap_prepare_apply() {
   bootstrap_reconcile_orphan_kms
+
+  if bootstrap_state_bucket_exists; then
+    export TF_BACKEND_BUCKET="$(bootstrap_state_bucket_name)"
+    export TF_BACKEND_REGION="${AWS_REGION}"
+    export TF_BACKEND_DYNAMODB_TABLE="$(bootstrap_dynamodb_table_name)"
+    export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
+  fi
 }
 
 # Pull remote state, empty the versioned bucket, and use local state for the final destroy (no S3 writes).
@@ -1062,7 +1069,7 @@ tf_init_s3_backend() {
   pushd "${dir}" >/dev/null
   export TF_BACKEND_KEY="${state_key}"
   mapfile -t backend_args < <(tf_backend_config_args)
-  terraform init -input=false "${backend_args[@]}"
+  terraform init -input=false -reconfigure "${backend_args[@]}"
   popd >/dev/null
 }
 
@@ -1130,7 +1137,8 @@ bootstrap_init() {
     bootstrap_apply_backend_env_from_repo_vars
     export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
     mapfile -t backend_args < <(tf_backend_config_args)
-    terraform init -input=false "${backend_args[@]}"
+    # -reconfigure: required after KMS/backend env changes (Terraform 1.7+).
+    terraform init -input=false -reconfigure "${backend_args[@]}"
   elif bootstrap_state_bucket_exists; then
     # Bucket exists: init S3 backend (kms_key_id only when alias points to an Enabled dedicated CMK).
     bootstrap_set_backend_for_existing_bucket
@@ -1151,8 +1159,8 @@ import_existing_bootstrap_resources() {
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   tf_common_vars
 
-  # Each workflow step is a new shell; re-init so .terraform matches local vs remote backend.
-  bootstrap_reconcile_orphan_kms || true
+  # Each workflow step is a new shell; align backend env and re-init (Terraform 1.7+).
+  bootstrap_prepare_apply
   bootstrap_init "${bootstrap_dir}"
 
   local name_prefix="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}"
