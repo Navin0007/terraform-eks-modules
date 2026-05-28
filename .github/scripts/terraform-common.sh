@@ -245,17 +245,20 @@ bootstrap_s3_backend_is_configured() {
 bootstrap_terraform_init_s3() {
   local mode="${1:-}"
   local config_path backend_arg
-  local -a init_extra=()
+  local -a init_flags=(-input=false -upgrade)
 
   config_path="$(bootstrap_write_backend_config_file ".terraform-backend.hcl")"
   backend_arg="-backend-config=${config_path}"
   if [ "${mode}" = "migrate" ]; then
-    init_extra=(-migrate-state -force-copy)
+    # -migrate-state and -reconfigure are mutually exclusive (Terraform 1.7+).
+    init_flags+=(-migrate-state -force-copy)
+  else
+    init_flags+=(-reconfigure)
   fi
 
   echo "Initializing S3 backend: s3://${TF_BACKEND_BUCKET}/${TF_BACKEND_KEY} (region ${TF_BACKEND_REGION})"
   rm -rf .terraform
-  terraform init -input=false -upgrade -reconfigure "${init_extra[@]}" "${backend_arg}"
+  terraform init "${init_flags[@]}" "${backend_arg}"
 
   if ! bootstrap_s3_backend_is_configured; then
     echo "::error::terraform init did not configure the S3 backend. Check TF_BACKEND_* and AWS credentials." >&2
