@@ -279,15 +279,10 @@ bootstrap_set_backend_from_aws() {
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
 
   local kms_alias
-  kms_alias="$(bootstrap_kms_alias_name)"
-  if ! bootstrap_kms_alias_exists; then
-    echo "::warning::KMS alias ${kms_alias} not found; remote backend is not ready." >&2
+  if ! bootstrap_export_reusable_kms_backend_env; then
+    echo "::warning::Bootstrap KMS alias not reusable; remote backend may omit kms_key_id." >&2
     return 1
   fi
-  export TF_BACKEND_KMS_KEY_ID
-  TF_BACKEND_KMS_KEY_ID="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
-  export TF_STATE_KMS_KEY_ARN
-  TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.Arn' --output text)"
 }
 
 # KMS key ID used to encrypt the existing state bucket (if SSE-KMS), else empty.
@@ -398,14 +393,46 @@ bootstrap_discover_pending_bootstrap_kms_key() {
   bootstrap_discover_unusable_bootstrap_kms_key
 }
 
-# When true, do not reuse a dedicated CMK in PendingDeletion (apply creates a new key instead).
-bootstrap_skip_pending_deletion_reuse() {
-  [ "${BOOTSTRAP_FORCE_NEW_KMS_KEY:-false}" = "true" ]
+bootstrap_kms_key_state() {
+  local key_id="$1"
+  aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true
 }
 
-# Resolve a bootstrap-dedicated CMK (alias, bucket SSE, or description scan). Never returns unrelated keys.
-bootstrap_resolve_dedicated_bootstrap_kms_key() {
+# Apply/plan: only reuse when alias exists, points to a dedicated CMK, and key is Enabled.
+bootstrap_resolve_reusable_bootstrap_kms_key() {
   local key_id kms_alias state
+
+  kms_alias="$(bootstrap_kms_alias_name)"
+
+  if ! bootstrap_kms_alias_exists; then
+    echo "Bootstrap alias ${kms_alias} not found; apply will create a new CMK and alias." >&2
+    return 1
+  fi
+
+  key_id="$(aws kms describe-key --key-id "${kms_alias}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.KeyId' --output text)"
+  state="$(bootstrap_kms_key_state "${key_id}")"
+
+  if [ "${state}" != "Enabled" ]; then
+    echo "Ignoring CMK ${key_id} behind ${kms_alias} (state=${state}); apply will create a new CMK." >&2
+    return 1
+  fi
+
+  if ! bootstrap_is_dedicated_bootstrap_kms_key "${key_id}"; then
+    echo "Ignoring ${key_id}: alias ${kms_alias} is not bound to a bootstrap-dedicated CMK." >&2
+    return 1
+  fi
+
+  printf '%s\n' "${key_id}"
+  return 0
+}
+
+# Destroy/recovery: find bootstrap CMK by alias, bucket SSE, or description (any state).
+bootstrap_resolve_dedicated_bootstrap_kms_key() {
+  local key_id kms_alias
 
   kms_alias="$(bootstrap_kms_alias_name)"
 
@@ -428,22 +455,23 @@ bootstrap_resolve_dedicated_bootstrap_kms_key() {
     echo "::warning::State bucket SSE uses ${key_id}, which is not the bootstrap state CMK; not reusing." >&2
   fi
 
-  if key_id="$(bootstrap_discover_dedicated_bootstrap_kms_key 2>/dev/null)"; then
-    state="$(aws kms describe-key --key-id "${key_id}" \
-      --region "${AWS_REGION}" \
-      --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
-    if [ "${state}" = "PendingDeletion" ] && bootstrap_skip_pending_deletion_reuse; then
-      echo "Dedicated bootstrap CMK ${key_id} is PendingDeletion; BOOTSTRAP_FORCE_NEW_KMS_KEY=true — apply will create a new CMK." >&2
-      return 1
-    fi
-    if [ "${state}" = "PendingDeletion" ]; then
-      echo "Dedicated bootstrap CMK ${key_id} is PendingDeletion (description matches); will cancel deletion and reuse." >&2
-    fi
-    printf '%s\n' "${key_id}"
-    return 0
-  fi
+  bootstrap_discover_dedicated_bootstrap_kms_key
+}
 
-  return 1
+# Set TF_BACKEND_KMS_* only when the bootstrap alias points to an Enabled dedicated CMK.
+bootstrap_export_reusable_kms_backend_env() {
+  local key_id
+
+  unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
+  if ! key_id="$(bootstrap_resolve_reusable_bootstrap_kms_key 2>/dev/null)"; then
+    return 1
+  fi
+  export TF_BACKEND_KMS_KEY_ID="${key_id}"
+  export TF_STATE_KMS_KEY_ARN
+  TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
+    --region "${AWS_REGION}" \
+    --query 'KeyMetadata.Arn' --output text)"
+  return 0
 }
 
 # Wait until KMS key reaches Enabled (or fail after timeout).
@@ -627,43 +655,28 @@ bootstrap_kms_key_needs_recovery() {
   [ "${state}" = "PendingDeletion" ] || [ "${state}" = "Disabled" ]
 }
 
-# Before bootstrap apply/import: reuse only the dedicated CMK; otherwise apply creates a new key.
+# Before bootstrap apply/import: reuse only Enabled CMK behind the bootstrap alias; never recover PendingDeletion/Disabled.
 bootstrap_reconcile_orphan_kms() {
-  local key_id="" kms_alias state
+  local key_id
 
   tf_common_vars
-  kms_alias="$(bootstrap_kms_alias_name)"
 
-  if ! key_id="$(bootstrap_resolve_dedicated_bootstrap_kms_key 2>/dev/null)"; then
-    echo "No bootstrap-dedicated CMK found; terraform apply will create a new aws_kms_key."
+  if key_id="$(bootstrap_resolve_reusable_bootstrap_kms_key 2>/dev/null)"; then
+    echo "Reusing bootstrap CMK ${key_id} (alias $(bootstrap_kms_alias_name), Enabled)."
+    export TF_BACKEND_KMS_KEY_ID="${key_id}"
+    export TF_STATE_KMS_KEY_ARN
+    TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.Arn' --output text)"
     return 0
   fi
 
-  state="$(aws kms describe-key --key-id "${key_id}" \
-    --region "${AWS_REGION}" \
-    --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
-
-  if bootstrap_kms_key_needs_recovery "${key_id}"; then
-    echo "Recovering bootstrap-dedicated CMK ${key_id} (${state}) before apply..."
-    bootstrap_restore_kms_key_usability "${key_id}" || return 1
-  elif [ "${state}" = "Enabled" ]; then
-    echo "Using enabled bootstrap-dedicated CMK ${key_id}."
-  fi
-
-  if ! bootstrap_kms_alias_exists; then
-    echo "Attaching bootstrap alias ${kms_alias} to dedicated CMK ${key_id}..."
-    bootstrap_ensure_kms_alias || return 1
-  fi
-
-  export TF_BACKEND_KMS_KEY_ID="${key_id}"
-  export TF_STATE_KMS_KEY_ARN
-  TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
-    --region "${AWS_REGION}" \
-    --query 'KeyMetadata.Arn' --output text)"
+  echo "No reusable bootstrap CMK; terraform apply will create aws_kms_key.terraform_state and a new alias."
+  unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
   return 0
 }
 
-# Run before bootstrap plan/apply in CI or locally.
+# Run before bootstrap plan/apply in CI or locally (never fails; does not cancel deletion or enable keys).
 bootstrap_prepare_apply() {
   bootstrap_reconcile_orphan_kms
 }
@@ -944,27 +957,12 @@ bootstrap_set_backend_for_existing_bucket() {
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
   unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
 
-  if bootstrap_kms_alias_exists; then
-    local kms_alias
-    kms_alias="$(bootstrap_kms_alias_name)"
-    export TF_BACKEND_KMS_KEY_ID
-    TF_BACKEND_KMS_KEY_ID="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.KeyId' --output text)"
-    export TF_STATE_KMS_KEY_ARN
-    TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${kms_alias}" --query 'KeyMetadata.Arn' --output text)"
+  if bootstrap_export_reusable_kms_backend_env; then
     return 0
   fi
 
-  local key_id
-  if key_id="$(bootstrap_kms_key_id_from_state_bucket)"; then
-    export TF_BACKEND_KMS_KEY_ID="${key_id}"
-    export TF_STATE_KMS_KEY_ARN
-    TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" --query 'KeyMetadata.Arn' --output text)"
-    echo "Using KMS key ${key_id} from existing state bucket encryption (no alias yet)." >&2
-  else
-    echo "State bucket exists without SSE-KMS; S3 backend will use bucket default encryption for state." >&2
-    export TF_BACKEND_KMS_KEY_ID=""
-    export TF_STATE_KMS_KEY_ARN=""
-  fi
+  echo "State bucket exists but bootstrap alias/KMS is not reusable; S3 backend init omits kms_key_id." >&2
+  unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
 }
 
 # Resolve TF_BACKEND_* for plan/destroy when bootstrap was applied in a previous run.
@@ -973,14 +971,19 @@ resolve_bootstrap_backend_env() {
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
 
   if [ -n "${TF_STATE_BUCKET:-}" ] \
-    && [ -n "${TF_STATE_KMS_KEY_ID:-}" ] \
-    && [ -n "${TF_STATE_DYNAMODB_TABLE:-}" ] \
-    && [ -n "${TF_STATE_KMS_KEY_ARN:-}" ]; then
+    && [ -n "${TF_STATE_DYNAMODB_TABLE:-}" ]; then
     export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
-    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
     export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
-    export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN}"
     export TF_BACKEND_REGION="${AWS_REGION}"
+    if [ -n "${TF_STATE_KMS_KEY_ID:-}" ] \
+      && [ "$(bootstrap_kms_key_state "${TF_STATE_KMS_KEY_ID}")" = "Enabled" ] \
+      && bootstrap_is_dedicated_bootstrap_kms_key "${TF_STATE_KMS_KEY_ID}"; then
+      export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
+      export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN:-}"
+    else
+      unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
+      echo "::warning::Repository KMS variables point to a non-reusable key; omitting kms_key_id from backend init." >&2
+    fi
     echo "Using bootstrap backend from repository variables."
     return 0
   fi
@@ -1082,6 +1085,21 @@ maybe_migrate_bootstrap_state() {
 }
 
 # Re-init bootstrap backend with S3 lockfile-based state locking.
+bootstrap_apply_backend_env_from_repo_vars() {
+  export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
+  export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
+  export TF_BACKEND_REGION="${AWS_REGION}"
+  unset TF_BACKEND_KMS_KEY_ID TF_STATE_KMS_KEY_ARN
+  if [ -n "${TF_STATE_KMS_KEY_ID:-}" ] \
+    && [ "$(bootstrap_kms_key_state "${TF_STATE_KMS_KEY_ID}")" = "Enabled" ] \
+    && bootstrap_is_dedicated_bootstrap_kms_key "${TF_STATE_KMS_KEY_ID}"; then
+    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID}"
+    export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN:-}"
+  elif bootstrap_state_bucket_exists; then
+    bootstrap_set_backend_for_existing_bucket
+  fi
+}
+
 bootstrap_enable_state_locking() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
@@ -1089,14 +1107,7 @@ bootstrap_enable_state_locking() {
 
   pushd "${bootstrap_dir}" >/dev/null
   if [ -n "${TF_STATE_BUCKET:-}" ]; then
-    export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
-    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID:-}"
-    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE:-}"
-    export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN:-}"
-    export TF_BACKEND_REGION="${AWS_REGION}"
-    if [ -z "${TF_BACKEND_KMS_KEY_ID}" ] && bootstrap_state_bucket_exists; then
-      bootstrap_set_backend_for_existing_bucket
-    fi
+    bootstrap_apply_backend_env_from_repo_vars
   elif bootstrap_state_bucket_exists; then
     bootstrap_set_backend_for_existing_bucket
   else
@@ -1116,24 +1127,12 @@ bootstrap_init() {
   pushd "${bootstrap_dir}" >/dev/null
 
   if [ -n "${TF_STATE_BUCKET:-}" ]; then
-    export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
-    export TF_BACKEND_KMS_KEY_ID="${TF_STATE_KMS_KEY_ID:-}"
-    export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE:-}"
-    export TF_STATE_KMS_KEY_ARN="${TF_STATE_KMS_KEY_ARN:-}"
-    export TF_BACKEND_REGION="${AWS_REGION}"
-    if [ -z "${TF_BACKEND_KMS_KEY_ID}" ] && bootstrap_state_bucket_exists; then
-      bootstrap_set_backend_for_existing_bucket
-    fi
+    bootstrap_apply_backend_env_from_repo_vars
     export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
     mapfile -t backend_args < <(tf_backend_config_args)
     terraform init -input=false "${backend_args[@]}"
-  elif bootstrap_remote_backend_ready; then
-    # Bootstrap was applied previously; use remote state even without TF_STATE_* vars.
-    bootstrap_set_backend_from_aws
-    mapfile -t backend_args < <(tf_backend_config_args)
-    terraform init -input=false -reconfigure "${backend_args[@]}"
   elif bootstrap_state_bucket_exists; then
-    # Bucket exists (partial bootstrap). Init S3 backend so import/plan work on Terraform 1.7+.
+    # Bucket exists: init S3 backend (kms_key_id only when alias points to an Enabled dedicated CMK).
     bootstrap_set_backend_for_existing_bucket
     mapfile -t backend_args < <(tf_backend_config_args)
     terraform init -input=false -reconfigure "${backend_args[@]}"
@@ -1182,16 +1181,12 @@ import_existing_bootstrap_resources() {
   }
 
   local key_id=""
-  if key_id="$(bootstrap_resolve_dedicated_bootstrap_kms_key 2>/dev/null)"; then
-    echo "Importing bootstrap-dedicated CMK ${key_id} into Terraform state..." >&2
-    if bootstrap_kms_key_needs_recovery "${key_id}"; then
-      bootstrap_restore_kms_key_usability "${key_id}" || true
-    fi
-    bootstrap_ensure_kms_alias || true
+  if key_id="$(bootstrap_resolve_reusable_bootstrap_kms_key 2>/dev/null)"; then
+    echo "Importing reusable bootstrap CMK ${key_id} into Terraform state..." >&2
     import_if_missing aws_kms_key.terraform_state "${key_id}"
     import_if_missing aws_kms_alias.terraform_state "${kms_alias}"
   else
-    echo "No bootstrap-dedicated CMK to import; apply will create aws_kms_key.terraform_state." >&2
+    echo "No reusable bootstrap CMK to import; apply will create aws_kms_key.terraform_state." >&2
   fi
 
   if aws s3api head-bucket --bucket "${state_bucket}" &>/dev/null; then

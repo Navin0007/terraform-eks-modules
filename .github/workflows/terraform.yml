@@ -177,10 +177,9 @@ jobs:
           || inputs.target == 'global/policies' || inputs.target == 'environments/dev'
         run: |
           source .github/scripts/terraform-common.sh
+          bootstrap_reconcile_orphan_kms || true
           if [ "${{ inputs.target }}" = "all" ] || [ "${{ inputs.target }}" = "global/bootstrap" ]; then
             bootstrap_prepare_apply
-          else
-            bootstrap_reconcile_orphan_kms || true
           fi
           bootstrap_precheck_report
           bootstrap_init global/bootstrap
