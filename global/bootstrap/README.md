@@ -135,20 +135,14 @@ bootstrap_init global/bootstrap
 
 **Alias gone vs key unusable:** destroying bootstrap removes the alias first; the CMK may become `PendingDeletion` (scheduled delete) or `Disabled`. Either state blocks S3 state access (`KMSInvalidStateException` / `KMS.DisabledException`). Run `bootstrap_recover_kms` to enable/cancel deletion and recreate the alias before plan/destroy, or use `bootstrap_finish_teardown` to empty the bucket and complete removal.
 
-**Fresh bootstrap after a failed destroy:** CI runs `bootstrap_prepare_apply` before plan/apply. Apply **only reuses** a CMK when **all** of these are true:
+**Fresh bootstrap after a failed destroy:** CI runs `bootstrap_prepare_apply` before plan/apply. It now selects a key as follows:
 
-1. Alias `alias/{project}-{environment}-terraform-state` exists  
-2. Alias points to a CMK whose description matches this module  
-3. That CMK is **`Enabled`**
+1. If bootstrap alias exists and points to an **Enabled** CMK, reuse it.
+2. Otherwise, scan available KMS keys and pick the first **Enabled** CMK.
+3. Point bootstrap alias `alias/{project}-{environment}-terraform-state` to that key.
+4. If no Enabled key exists, apply creates `aws_kms_key.terraform_state`.
 
-| CMK state | Apply behavior |
-|-----------|----------------|
-| `PendingDeletion` or `Disabled` | **Ignored** — apply creates a **new** CMK and alias (no cancel/enable) |
-| `Enabled` + matching alias | **Reuse** (import into state) |
-| `Enabled` but **no alias** | **Ignored** — create new CMK and alias |
-| Wrong description / other workload | **Ignored** |
-
-Manual recovery (`bootstrap_recover_kms`) is only for **destroy/teardown** when you must read encrypted S3 state — not for normal apply.
+`PendingDeletion` / `Disabled` keys are not used on apply.
 
 To **remove** the key and bucket (full teardown after a failed destroy):
 

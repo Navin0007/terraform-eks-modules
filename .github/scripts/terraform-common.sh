@@ -444,29 +444,43 @@ bootstrap_kms_key_state() {
     --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true
 }
 
-# Apply/plan: only reuse when alias exists, points to a dedicated CMK, and key is Enabled.
+# Return first Enabled KMS key in the account/region.
+bootstrap_discover_any_enabled_kms_key() {
+  local key_id state
+
+  while read -r key_id; do
+    [ -z "${key_id}" ] && continue
+    state="$(bootstrap_kms_key_state "${key_id}")"
+    if [ "${state}" = "Enabled" ]; then
+      printf '%s\n' "${key_id}"
+      return 0
+    fi
+  done < <(aws kms list-keys --region "${AWS_REGION}" \
+    --query 'Keys[].KeyId' --output text 2>/dev/null | tr '\t' '\n')
+
+  return 1
+}
+
+# Apply/plan: reuse alias key if Enabled; otherwise pick any Enabled key and map alias to it.
 bootstrap_resolve_reusable_bootstrap_kms_key() {
   local key_id kms_alias state
 
   kms_alias="$(bootstrap_kms_alias_name)"
 
-  if ! bootstrap_kms_alias_exists; then
-    echo "Bootstrap alias ${kms_alias} not found; apply will create a new CMK and alias." >&2
-    return 1
+  if bootstrap_kms_alias_exists; then
+    key_id="$(aws kms describe-key --key-id "${kms_alias}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyId' --output text)"
+    state="$(bootstrap_kms_key_state "${key_id}")"
+    if [ "${state}" = "Enabled" ]; then
+      printf '%s\n' "${key_id}"
+      return 0
+    fi
+    echo "Alias ${kms_alias} points to ${key_id} (state=${state}); selecting another Enabled key." >&2
   fi
 
-  key_id="$(aws kms describe-key --key-id "${kms_alias}" \
-    --region "${AWS_REGION}" \
-    --query 'KeyMetadata.KeyId' --output text)"
-  state="$(bootstrap_kms_key_state "${key_id}")"
-
-  if [ "${state}" != "Enabled" ]; then
-    echo "Ignoring CMK ${key_id} behind ${kms_alias} (state=${state}); apply will create a new CMK." >&2
-    return 1
-  fi
-
-  if ! bootstrap_is_dedicated_bootstrap_kms_key "${key_id}"; then
-    echo "Ignoring ${key_id}: alias ${kms_alias} is not bound to a bootstrap-dedicated CMK." >&2
+  if ! key_id="$(bootstrap_discover_any_enabled_kms_key 2>/dev/null)"; then
+    echo "No Enabled KMS key found; apply will create aws_kms_key.terraform_state." >&2
     return 1
   fi
 
@@ -582,19 +596,16 @@ bootstrap_cancel_kms_pending_deletion() {
   bootstrap_restore_kms_key_usability "$@"
 }
 
-# Recreate bootstrap KMS alias when it was deleted but the dedicated key still exists.
+# Ensure bootstrap KMS alias points to selected key.
 bootstrap_ensure_kms_alias() {
-  local key_id kms_alias target
+  local key_id="${1:-}" kms_alias target
 
   kms_alias="$(bootstrap_kms_alias_name)"
-  if ! key_id="$(bootstrap_resolve_dedicated_bootstrap_kms_key 2>/dev/null)"; then
-    echo "No bootstrap-dedicated CMK to attach alias ${kms_alias}; apply will create a new key." >&2
-    return 0
-  fi
-
-  if ! bootstrap_is_dedicated_bootstrap_kms_key "${key_id}"; then
-    echo "::error::Refusing to attach bootstrap alias to non-dedicated key ${key_id}." >&2
-    return 1
+  if [ -z "${key_id}" ]; then
+    if ! key_id="$(bootstrap_resolve_reusable_bootstrap_kms_key 2>/dev/null)"; then
+      echo "No Enabled KMS key available to attach alias ${kms_alias}; apply will create a new key." >&2
+      return 0
+    fi
   fi
 
   if bootstrap_kms_alias_exists; then
@@ -699,14 +710,15 @@ bootstrap_kms_key_needs_recovery() {
   [ "${state}" = "PendingDeletion" ] || [ "${state}" = "Disabled" ]
 }
 
-# Before bootstrap apply/import: reuse only Enabled CMK behind the bootstrap alias; never recover PendingDeletion/Disabled.
+# Before bootstrap apply/import: pick an Enabled key, set alias, and use it.
 bootstrap_reconcile_orphan_kms() {
   local key_id
 
   tf_common_vars
 
   if key_id="$(bootstrap_resolve_reusable_bootstrap_kms_key 2>/dev/null)"; then
-    echo "Reusing bootstrap CMK ${key_id} (alias $(bootstrap_kms_alias_name), Enabled)."
+    bootstrap_ensure_kms_alias "${key_id}" || true
+    echo "Using bootstrap CMK ${key_id} (alias $(bootstrap_kms_alias_name), Enabled)."
     export TF_BACKEND_KMS_KEY_ID="${key_id}"
     export TF_STATE_KMS_KEY_ARN
     TF_STATE_KMS_KEY_ARN="$(aws kms describe-key --key-id "${key_id}" \
