@@ -1,0 +1,2 @@
+# CI workspace snapshot when backend.tf is swapped to backend "local"
+backend.tf.s3.workspace

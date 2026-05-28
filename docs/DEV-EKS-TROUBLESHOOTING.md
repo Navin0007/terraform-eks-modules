@@ -59,13 +59,13 @@ Occurs on `import_existing_bootstrap_resources` after `terraform init -backend=f
 
 **Cause**
 
-Terraform **1.7+** requires a configured S3 backend for `import` / `plan` / `apply` when `backend "s3"` is declared in `backend.tf`. Local-only init (`-backend=false`) works only while the state bucket **does not exist** in AWS. If the bucket exists (partial bootstrap), `terraform import` fails after local init.
+Terraform **1.7+** requires the configured backend type in `backend.tf` to match init. With `backend "s3"` declared, `terraform init -backend=false` leaves S3 unconfigured and **`terraform import` fails** even when the state bucket does not exist yet (e.g. KMS alias exists, bucket missing).
 
 **Fix (in repo)**
 
 - `bootstrap_init_mode`: **local** when no bucket; **partial_s3** when bucket exists but state object is not in S3 yet; **remote** after migration.
-- Partial S3 init uses `bootstrap_set_backend_for_existing_bucket` (omits `kms_key_id` / DynamoDB until they exist).
-- Use `-state=terraform.tfstate` only in **local** mode (no bucket yet).
+- **Local mode:** CI swaps `backend.tf` to `backend "local"` (`bootstrap_activate_local_backend_file`), runs `terraform init`, import/plan/apply, then `bootstrap_restore_s3_backend_file` before S3 migration.
+- **Partial S3:** `bootstrap_set_backend_for_existing_bucket` + S3 init (omits `kms_key_id` / DynamoDB until they exist).
 
 **Reference:** `global/bootstrap/backend.tf`; `.github/scripts/terraform-common.sh` — `bootstrap_init`, `import_existing_bootstrap_resources` (~L507–L607).
 

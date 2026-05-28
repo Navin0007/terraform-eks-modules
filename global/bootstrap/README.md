@@ -101,7 +101,7 @@ GitHub Actions picks the init mode from AWS:
 
 | Condition | Init mode |
 |-----------|-----------|
-| State bucket does not exist | **Local** (`-backend=false`); migrate uploads state after apply |
+| State bucket does not exist | **Local** (CI swaps `backend.tf` to `backend "local"`; migrate restores S3) |
 | Bucket exists, state object not in S3 yet | **Partial S3** (required for Terraform 1.7+ import/plan when `backend "s3"` is declared) |
 | State object already in S3 | **Remote** S3 backend |
 

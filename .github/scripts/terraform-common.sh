@@ -312,9 +312,9 @@ bootstrap_remote_backend_ready() {
   bootstrap_state_bucket_exists && bootstrap_kms_alias_exists
 }
 
-# Terraform 1.7+ init mode for bootstrap (backend "s3" is declared in backend.tf):
-#   local      — no state bucket in AWS yet; -backend=false, state on disk until migrate
-#   partial_s3 — bucket exists but state object not in S3; must init S3 for import/plan/apply
+# Terraform 1.7+ init mode for bootstrap:
+#   local      — no state bucket in AWS; swap backend.tf to backend "local" (S3 block breaks import)
+#   partial_s3 — bucket exists but state object not in S3; init S3 with partial -backend-config
 #   remote     — state object already in S3
 bootstrap_init_mode() {
   if bootstrap_state_migrated_to_s3; then
@@ -334,13 +334,53 @@ bootstrap_uses_partial_s3_backend() {
   [ "$(bootstrap_init_mode)" = partial_s3 ]
 }
 
+# Terraform 1.7+ cannot import/plan when backend.tf declares backend "s3" but init skipped S3.
+# Swap to backend "local" in the workspace until maybe_migrate_bootstrap_state restores S3.
+bootstrap_activate_local_backend_file() {
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
+  pushd "${bootstrap_dir}" >/dev/null
+  if [ -f backend.tf.s3.workspace ]; then
+    popd >/dev/null
+    return 0
+  fi
+  if [ ! -f backend.tf ]; then
+    echo "::error::global/bootstrap/backend.tf not found" >&2
+    popd >/dev/null
+    return 1
+  fi
+  cp -f backend.tf backend.tf.s3.workspace
+  cat >backend.tf <<'EOF'
+# Workspace copy for brand-new bootstrap (no state bucket yet). Restored after S3 migration.
+terraform {
+  backend "local" {
+    path = "terraform.tfstate"
+  }
+}
+EOF
+  echo "Bootstrap: using backend \"local\" until state migrates to S3 (Terraform 1.7+ import/plan compat)." >&2
+  popd >/dev/null
+}
+
+bootstrap_restore_s3_backend_file() {
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
+  pushd "${bootstrap_dir}" >/dev/null
+  if [ -f backend.tf.s3.workspace ]; then
+    mv -f backend.tf.s3.workspace backend.tf
+    echo "Bootstrap: restored backend \"s3\" in backend.tf." >&2
+  fi
+  popd >/dev/null
+}
+
 bootstrap_init_local() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   echo "Bootstrap init: local state (state bucket does not exist yet)."
+  bootstrap_activate_local_backend_file "${bootstrap_dir}"
   pushd "${bootstrap_dir}" >/dev/null
   rm -rf .terraform
-  terraform init -input=false -backend=false -reconfigure
+  terraform init -input=false -reconfigure
   popd >/dev/null
 }
 
@@ -348,15 +388,14 @@ bootstrap_init_partial_s3() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   echo "Bootstrap init: partial S3 backend (bucket exists; configuring S3 for import/plan/apply)." >&2
+  bootstrap_restore_s3_backend_file "${bootstrap_dir}"
   pushd "${bootstrap_dir}" >/dev/null
   bootstrap_set_backend_for_existing_bucket
   bootstrap_terraform_init_s3
   popd >/dev/null
 }
 
-# No extra CLI args: local state is established by bootstrap_init -backend=false.
-# Do not pass -state=terraform.tfstate; with backend "s3" in backend.tf that triggers
-# "Backend initialization required" on import/plan/apply in Terraform 1.7+.
+# No extra CLI args when backend "local" is active; default state path is terraform.tfstate.
 bootstrap_local_state_args() {
   :
 }
@@ -863,7 +902,9 @@ bootstrap_switch_to_local_state_for_teardown() {
 
   pushd "${bootstrap_abs}" >/dev/null
   echo "Switching to local backend for final bootstrap destroy (prevents state writes to S3/KMS)..."
-  terraform init -input=false -backend=false -reconfigure
+  bootstrap_activate_local_backend_file "${bootstrap_abs}"
+  rm -rf .terraform
+  terraform init -input=false -reconfigure
   if [ -s terraform.tfstate.teardown ]; then
     mv terraform.tfstate.teardown terraform.tfstate
   fi
@@ -1222,11 +1263,13 @@ maybe_migrate_bootstrap_state() {
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
 
   if bootstrap_state_migrated_to_s3; then
+    bootstrap_restore_s3_backend_file "${bootstrap_dir}"
     bootstrap_enable_state_locking "${bootstrap_dir}"
     return 0
   fi
 
   export_bootstrap_outputs "${bootstrap_dir}"
+  bootstrap_restore_s3_backend_file "${bootstrap_dir}"
   pushd "${bootstrap_dir}" >/dev/null
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
   bootstrap_terraform_init_s3 migrate
@@ -1305,6 +1348,7 @@ bootstrap_init() {
       ;;
     remote)
       echo "Bootstrap init: remote S3 backend (state already in bucket)."
+      bootstrap_restore_s3_backend_file "${bootstrap_dir}"
       pushd "${bootstrap_dir}" >/dev/null
       bootstrap_resolve_s3_backend_env
       bootstrap_terraform_init_s3
@@ -1343,7 +1387,6 @@ bootstrap_run_apply() {
 # (for example after a partial apply or lost local state before S3 migration).
 import_existing_bootstrap_resources() {
   local bootstrap_dir
-  local local_state_mode="false"
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   tf_common_vars
   bootstrap_prepare_apply
@@ -1357,15 +1400,12 @@ import_existing_bootstrap_resources() {
   case "$(bootstrap_init_mode)" in
     local)
       bootstrap_init_local "${bootstrap_dir}"
-      local_state_mode="true"
       ;;
     partial_s3)
       bootstrap_init_partial_s3 "${bootstrap_dir}"
-      local_state_mode="false"
       ;;
     remote)
       bootstrap_init "${bootstrap_dir}"
-      local_state_mode="false"
       ;;
   esac
   mapfile -t var_args < <(tf_var_args)
@@ -1373,28 +1413,19 @@ import_existing_bootstrap_resources() {
 
   terraform_state_has() {
     local addr="$1"
-    local -a show_state_args=("${state_args[@]}")
-    if [ "${local_state_mode}" = "true" ]; then
-      show_state_args=("-state=terraform.tfstate")
-    fi
-    terraform state show -no-color "${show_state_args[@]}" "${addr}" &>/dev/null
+    terraform state show -no-color "${state_args[@]}" "${addr}" &>/dev/null
   }
 
   import_if_missing() {
     local addr="$1"
     local id="$2"
-    local -a import_state_args=("${state_args[@]}")
 
     if terraform_state_has "${addr}"; then
       return 0
     fi
 
-    if [ "${local_state_mode}" = "true" ]; then
-      import_state_args=("-state=terraform.tfstate")
-    fi
-
     echo "Importing existing bootstrap resource ${addr}..."
-    terraform import -input=false "${import_state_args[@]}" "${var_args[@]}" "${addr}" "${id}"
+    terraform import -input=false "${state_args[@]}" "${var_args[@]}" "${addr}" "${id}"
   }
 
   local key_id=""

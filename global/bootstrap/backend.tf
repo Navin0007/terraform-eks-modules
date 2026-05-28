@@ -1,5 +1,5 @@
 # Remote state in this module's S3 bucket (created by the resources below).
-# On first apply, init with -backend=false (local state), then migrate after the bucket exists.
+# CI swaps this file to backend "local" when the state bucket does not exist yet (see terraform-common.sh).
 # Pass bucket, region, kms_key_id, and use_lockfile=true via -backend-config on init (see README).
 terraform {
   backend "s3" {
