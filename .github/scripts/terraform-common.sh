@@ -1288,6 +1288,7 @@ bootstrap_run_apply() {
 # (for example after a partial apply or lost local state before S3 migration).
 import_existing_bootstrap_resources() {
   local bootstrap_dir
+  local local_state_mode="false"
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   tf_common_vars
 
@@ -1303,6 +1304,7 @@ import_existing_bootstrap_resources() {
   pushd "${bootstrap_dir}" >/dev/null
   if ! bootstrap_state_bucket_exists; then
     terraform init -input=false -backend=false -reconfigure
+    local_state_mode="true"
   fi
   mapfile -t var_args < <(tf_var_args)
   mapfile -t state_args < <(bootstrap_local_state_args)
@@ -1314,13 +1316,18 @@ import_existing_bootstrap_resources() {
   import_if_missing() {
     local addr="$1"
     local id="$2"
+    local -a import_state_args=("${state_args[@]}")
 
     if terraform_state_has "${addr}"; then
       return 0
     fi
 
+    if [ "${local_state_mode}" = "true" ]; then
+      import_state_args=("-state=terraform.tfstate")
+    fi
+
     echo "Importing existing bootstrap resource ${addr}..."
-    terraform import -input=false "${state_args[@]}" "${var_args[@]}" "${addr}" "${id}"
+    terraform import -input=false "${import_state_args[@]}" "${var_args[@]}" "${addr}" "${id}"
   }
 
   local key_id=""
