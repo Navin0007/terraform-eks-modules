@@ -8,11 +8,177 @@ History of issues seen while bringing up **my-project / dev** (`my-project-dev-e
 
 ### 1. Bootstrap / Terraform backend
 
-**What:** Early applies failed; backend not ready.
+**What:** Early applies failed; backend not ready, or CI failed during `bootstrap_init` / import on a **partial** bootstrap (some AWS resources exist, others do not).
 
-**Why:** Remote state (S3, locks, KMS) did not exist before Terraform expected it.
+**Why:** Remote state (S3, locks, KMS) did not exist before Terraform expected it, **or** a previous run left orphaned resources (S3 bucket without DynamoDB, KMS keys without alias, bucket settings not applied).
 
-**Fix:** Bootstrap first with local state, then migrate to S3; CI runs bootstrap → policies → dev in order.
+**Fix:** Bootstrap first; CI runs bootstrap → policies → dev in order. For partial bootstrap, use recovery import + apply (see **1a–1g** below). After first successful apply, save GitHub repo variables: `TF_STATE_BUCKET`, `TF_STATE_KMS_KEY_ID`, `TF_STATE_DYNAMODB_TABLE`, `TF_STATE_KMS_KEY_ARN`.
+
+**Expected resource names (my-project / dev):**
+
+| Resource | Name |
+|----------|------|
+| S3 state bucket | `my-project-dev-terraform-state-<account_id>` |
+| DynamoDB lock table | `my-project-dev-terraform-locks` |
+| KMS alias | `alias/my-project-dev-terraform-state` |
+
+---
+
+#### 1a. `NotFoundException`: KMS alias not found on `bootstrap_init`
+
+**Symptoms**
+
+```
+aws kms describe-key --key-id alias/my-project-dev-terraform-state
+NotFoundException: Alias ... is not found
+```
+
+**Cause**
+
+`bootstrap_init` saw the **state S3 bucket** (`head-bucket` succeeded) and assumed bootstrap was complete. It called `aws kms describe-key` on the alias, but the alias was never created (partial apply, manual bucket, or KMS keys exist without alias).
+
+**Fix (in repo)**
+
+- Require **both** bucket **and** KMS alias before treating remote backend as ready (`bootstrap_remote_backend_ready`).
+- If bucket exists but alias does not, init partial S3 backend instead of failing on `describe-key`.
+
+**Reference:** `.github/scripts/terraform-common.sh` — `bootstrap_remote_backend_ready`, `bootstrap_set_backend_for_existing_bucket`, `bootstrap_init` (~L259–L535).
+
+---
+
+#### 1b. `Backend initialization required` on `terraform import`
+
+**Symptoms**
+
+```
+Error: Backend initialization required, please run "terraform init"
+Reason: Initial configuration of the requested backend "s3"
+```
+
+Occurs on `import_existing_bootstrap_resources` after `terraform init -backend=false`.
+
+**Cause**
+
+Terraform **1.7+** requires a configured S3 backend for `import` / `plan` / `apply` when `backend "s3"` is declared in `backend.tf`. Local-only init (`-backend=false`) is not enough once the state bucket already exists in AWS.
+
+**Fix (in repo)**
+
+- When the state bucket exists, run `terraform init -reconfigure` with S3 `-backend-config=...` (discover KMS from alias or bucket default encryption).
+- Do **not** pass deprecated `-state=terraform.tfstate` on import/plan/apply.
+
+**Reference:** `global/bootstrap/backend.tf`; `.github/scripts/terraform-common.sh` — `bootstrap_init`, `import_existing_bootstrap_resources` (~L507–L607).
+
+---
+
+#### 1c. `Error acquiring the state lock` — DynamoDB table not found
+
+**Symptoms**
+
+```
+ResourceNotFoundException: Requested resource not found
+Unable to retrieve item from DynamoDB table "my-project-dev-terraform-locks"
+```
+
+**Cause**
+
+S3 backend was initialized with `dynamodb_table=...` before the lock table existed (partial bootstrap: bucket yes, DynamoDB no).
+
+**Fix (in repo)**
+
+- Omit `dynamodb_table` from backend config until `bootstrap_dynamodb_table_exists` is true.
+- After bootstrap apply creates the table, run `bootstrap_enable_state_locking` to re-init with locking enabled.
+
+**Reference:** `.github/scripts/terraform-common.sh` — `tf_backend_config_args`, `bootstrap_enable_state_locking`; `.github/workflows/terraform.yml` — Bootstrap apply step (~L195–L204).
+
+---
+
+#### 1d. `Too many command line arguments` on `terraform init`
+
+**Symptoms**
+
+```
+Warning: State bucket exists without SSE-KMS; ...
+Error: Too many command line arguments. Did you mean to use -chdir?
+```
+
+**Cause**
+
+Informational `echo` lines in `tf_backend_config_args` / `bootstrap_set_backend_for_existing_bucket` went to **stdout**. `mapfile` captured them as extra Terraform CLI arguments.
+
+**Fix (in repo)**
+
+- Send bootstrap status messages to **stderr** (`>&2`), not stdout.
+
+**Reference:** `.github/scripts/terraform-common.sh` — `tf_backend_config_args`, `bootstrap_set_backend_for_existing_bucket` (~L204–L360).
+
+---
+
+#### 1e. S3 sub-resource import failure (public access block, versioning, encryption)
+
+**Symptoms**
+
+- Bucket import succeeds.
+- Import fails on `aws_s3_bucket_public_access_block.terraform_state` (or versioning / encryption) with “resource does not exist”.
+
+**Cause**
+
+The bucket was created manually or by a partial apply **without** public access block, versioning, or SSE-KMS. Terraform cannot import resources that do not exist in AWS.
+
+**Fix (in repo)**
+
+- Before import, check AWS with `get-public-access-block`, `get-bucket-versioning`, `get-bucket-encryption`.
+- Skip import for missing sub-resources; **apply** creates them.
+
+**Reference:** `.github/scripts/terraform-common.sh` — `bootstrap_s3_bucket_*_exists`, `import_existing_bootstrap_resources` (~L316–L600).
+
+---
+
+#### 1f. KMS keys exist but alias is missing
+
+**Symptoms**
+
+- Warning: state bucket exists; KMS alias missing (or bucket has no SSE-KMS).
+- One or more KMS keys in the account (sometimes re-enabled after pending deletion) **without** `alias/my-project-dev-terraform-state`.
+
+**Cause**
+
+KMS **key** and KMS **alias** are separate. Bootstrap is not complete until the alias exists and (ideally) bucket encryption, DynamoDB, and bucket hardening are in place.
+
+**What CI does**
+
+| Condition | Behavior |
+|-----------|----------|
+| Alias exists | Import key + alias; use alias for backend KMS |
+| No alias, bucket uses SSE-KMS | Import key from bucket encryption; apply creates alias |
+| No alias, bucket not SSE-KMS | Skip KMS import; apply creates new key + alias + bucket settings |
+
+**Optional manual step:** In KMS console, attach alias `my-project-dev-terraform-state` to the correct existing key, then re-run bootstrap apply.
+
+**Reference:** `global/bootstrap/main.tf` — `aws_kms_key`, `aws_kms_alias`; `.github/scripts/terraform-common.sh` — `bootstrap_kms_key_id_from_state_bucket`.
+
+---
+
+#### 1g. Partial bootstrap — operational recovery
+
+**Typical partial state:** S3 bucket yes; DynamoDB no; KMS alias no; bucket settings incomplete.
+
+**Steps**
+
+1. Run **Actions → Terraform → apply → `global/bootstrap`** on latest `main`.
+2. Confirm in logs: S3 backend init (no DynamoDB lock until table exists) → import bucket only → apply creates missing resources → `bootstrap_enable_state_locking`.
+3. Save printed `TF_STATE_*` repo variables.
+4. Run **policies**, then **dev**.
+
+**Verify in AWS (same account/region as CI):**
+
+```bash
+aws s3api head-bucket --bucket my-project-dev-terraform-state-<account_id>
+aws dynamodb describe-table --table-name my-project-dev-terraform-locks
+aws kms describe-key --key-id alias/my-project-dev-terraform-state
+aws s3api get-public-access-block --bucket my-project-dev-terraform-state-<account_id>
+```
+
+**Reference:** `global/bootstrap/README.md` — “Recovering from partial bootstrap applies”.
 
 ---
 
@@ -262,8 +428,9 @@ Line numbers refer to current `main` and may shift as the repo evolves.
 | Stale state cleanup | `.github/scripts/terraform-common.sh` | 525–540 |
 | vpc-cni before nodes | `modules/eks/bootstrap_addons.tf` | 1–13 |
 | vpc-cni (addons off) | `environments/dev/main.tf` | 141–142 |
-| Bootstrap init | `.github/scripts/terraform-common.sh` | 284–304 |
-| Workflow order | `.github/workflows/terraform.yml` | 31–38, 234–240, 196–218 |
+| Bootstrap init / partial recovery | `.github/scripts/terraform-common.sh` | 204–607 |
+| Bootstrap CI workflow | `.github/workflows/terraform.yml` | 174–220 |
+| Workflow order | `.github/workflows/terraform.yml` | 31–38, 221–240, 195–218 |
 | CI fmt | `.github/workflows/terraform.yml` | 56–70 |
 
 ---
@@ -351,7 +518,14 @@ EC2_LINUX access entries also need **`AmazonEKSNodegroupPolicy`** associated (`a
 
 | Symptom | First reference |
 |--------|------------------|
-| KMS / volume errors | `global/bootstrap/main.tf` L49–84 |
+| KMS alias NotFound on bootstrap init | §1a — `bootstrap_remote_backend_ready` |
+| Backend init required on import | §1b — `bootstrap_init` + S3 `-backend-config` |
+| DynamoDB lock table not found | §1c — `tf_backend_config_args`, `bootstrap_enable_state_locking` |
+| Too many CLI arguments on init | §1d — stderr for bootstrap log lines |
+| S3 public access block import fail | §1e — `bootstrap_s3_bucket_*_exists` |
+| KMS keys but no alias | §1f — partial bootstrap / apply creates alias |
+| Partial bootstrap (bucket only) | §1g — recovery steps + `global/bootstrap/README.md` |
+| KMS / volume errors (EKS nodes) | `global/bootstrap/main.tf` L49–84 |
 | Cluster 409 / replace | `modules/eks/main.tf` L32–50 |
 | Access entry mode error | `upgrade-eks-authentication-mode.sh` L22–28 |
 | Policy on EC2_LINUX entry | `modules/eks/access.tf` L1–10 |

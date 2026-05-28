@@ -275,6 +275,17 @@ bootstrap_state_bucket_exists() {
   aws s3api head-bucket --bucket "${bucket}" &>/dev/null
 }
 
+# True after maybe_migrate_bootstrap_state (or a prior successful apply) uploaded state to S3.
+bootstrap_state_migrated_to_s3() {
+  local bucket
+  bucket="$(bootstrap_state_bucket_name)"
+  bootstrap_state_bucket_exists \
+    && aws s3api head-object \
+      --bucket "${bucket}" \
+      --key "global/bootstrap/terraform.tfstate" \
+      --region "${AWS_REGION}" &>/dev/null
+}
+
 bootstrap_dynamodb_table_name() {
   tf_common_vars
   printf '%s\n' "${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-locks"
@@ -301,11 +312,19 @@ bootstrap_remote_backend_ready() {
   bootstrap_state_bucket_exists && bootstrap_kms_alias_exists
 }
 
-# True only for a brand-new bootstrap (no state bucket in AWS yet).
-# Terraform 1.7+ requires a configured S3 backend for import/plan when backend "s3" is declared;
-# if the bucket already exists, init the S3 backend instead of -backend=false.
+# Import/plan/apply use local state until bootstrap state is in S3 (then remote backend).
 bootstrap_uses_local_state() {
-  [ -z "${TF_STATE_BUCKET:-}" ] && ! bootstrap_state_bucket_exists
+  ! bootstrap_state_migrated_to_s3
+}
+
+bootstrap_init_local() {
+  local bootstrap_dir
+  bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
+  echo "Bootstrap init: local state (S3 state object not present yet)."
+  pushd "${bootstrap_dir}" >/dev/null
+  rm -rf .terraform
+  terraform init -input=false -backend=false -reconfigure
+  popd >/dev/null
 }
 
 # No extra CLI args: local state is established by bootstrap_init -backend=false.
@@ -1175,7 +1194,7 @@ maybe_migrate_bootstrap_state() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
 
-  if [ -n "${TF_STATE_BUCKET:-}" ]; then
+  if bootstrap_state_migrated_to_s3; then
     bootstrap_enable_state_locking "${bootstrap_dir}"
     return 0
   fi
@@ -1248,16 +1267,16 @@ bootstrap_resolve_s3_backend_env() {
 bootstrap_init() {
   local bootstrap_dir
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
-  pushd "${bootstrap_dir}" >/dev/null
 
-  if bootstrap_resolve_s3_backend_env; then
-    bootstrap_terraform_init_s3
-  else
-    # Brand-new bootstrap: no state bucket yet; local state until maybe_migrate_bootstrap_state.
-    rm -rf .terraform
-    terraform init -input=false -backend=false
+  if bootstrap_uses_local_state; then
+    bootstrap_init_local "${bootstrap_dir}"
+    return 0
   fi
 
+  echo "Bootstrap init: remote S3 backend (state already in bucket)."
+  pushd "$(bootstrap_dir_abs "${bootstrap_dir}")" >/dev/null
+  bootstrap_resolve_s3_backend_env
+  bootstrap_terraform_init_s3
   popd >/dev/null
 }
 
@@ -1281,24 +1300,16 @@ bootstrap_run_apply() {
   mapfile -t destroy_args < <(bootstrap_destroy_var_args)
   terraform apply -input=false -auto-approve -no-color "${var_args[@]}" "${destroy_args[@]}"
   popd >/dev/null
-  bootstrap_enable_state_locking "${bootstrap_dir}"
 }
 
 # Import bootstrap resources that already exist in AWS but are missing from state
 # (for example after a partial apply or lost local state before S3 migration).
 import_existing_bootstrap_resources() {
   local bootstrap_dir
-  local use_remote_backend="false"
   local local_state_mode="false"
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   tf_common_vars
-
-  # Each workflow step is a new shell. If bucket exists, align remote backend and init once.
-  if bootstrap_state_bucket_exists; then
-    use_remote_backend="true"
-    bootstrap_prepare_apply
-    bootstrap_init "${bootstrap_dir}"
-  fi
+  bootstrap_prepare_apply
 
   local name_prefix="${TF_PROJECT_NAME}-${TF_ENVIRONMENT}"
   local state_bucket="${name_prefix}-terraform-state-${AWS_ACCOUNT_ID}"
@@ -1306,9 +1317,11 @@ import_existing_bootstrap_resources() {
   local kms_alias="alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
 
   pushd "${bootstrap_dir}" >/dev/null
-  if [ "${use_remote_backend}" != "true" ]; then
-    terraform init -input=false -backend=false -reconfigure
+  if bootstrap_uses_local_state; then
+    bootstrap_init_local "${bootstrap_dir}"
     local_state_mode="true"
+  else
+    bootstrap_init "${bootstrap_dir}"
   fi
   mapfile -t var_args < <(tf_var_args)
   mapfile -t state_args < <(bootstrap_local_state_args)
