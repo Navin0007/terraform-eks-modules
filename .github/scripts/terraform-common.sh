@@ -205,18 +205,62 @@ dev_import_diagnostics() {
 }
 
 tf_backend_config_args() {
+  local config_file="${1:-.terraform-backend.hcl}"
+  bootstrap_write_backend_config_file "${config_file}"
+  printf '%s\n' "-backend-config=${config_file}"
+}
+
+# Write backend.ci.hcl for terraform init (more reliable than many -backend-config flags on TF 1.7+).
+bootstrap_write_backend_config_file() {
+  local config_path="${1:-.terraform-backend.hcl}"
+
   : "${TF_BACKEND_BUCKET:?Set TF_BACKEND_BUCKET}"
   : "${TF_BACKEND_REGION:?Set TF_BACKEND_REGION}"
+  : "${TF_BACKEND_KEY:?Set TF_BACKEND_KEY}"
 
-  printf '%s\n' \
-    "-backend-config=bucket=${TF_BACKEND_BUCKET}" \
-    "-backend-config=key=${TF_BACKEND_KEY}" \
-    "-backend-config=region=${TF_BACKEND_REGION}" \
-    "-backend-config=encrypt=true" \
-    "-backend-config=use_lockfile=true"
+  cat >"${config_path}" <<EOF
+bucket       = "${TF_BACKEND_BUCKET}"
+key          = "${TF_BACKEND_KEY}"
+region       = "${TF_BACKEND_REGION}"
+encrypt      = true
+use_lockfile = true
+EOF
   if [ -n "${TF_BACKEND_KMS_KEY_ID:-}" ]; then
-    printf '%s\n' "-backend-config=kms_key_id=${TF_BACKEND_KMS_KEY_ID}"
+    cat >>"${config_path}" <<EOF
+kms_key_id   = "${TF_BACKEND_KMS_KEY_ID}"
+EOF
   fi
+  printf '%s\n' "${config_path}"
+}
+
+# True when terraform init configured the S3 backend (not provider-only init).
+bootstrap_s3_backend_is_configured() {
+  [ -f .terraform/terraform.tfstate ] \
+    && grep -qE '"type":\s*"s3"' .terraform/terraform.tfstate 2>/dev/null
+}
+
+# Full S3 backend init for Terraform 1.7+ (clean .terraform + reconfigure + verify).
+# Optional second argument: "migrate" runs -migrate-state -force-copy (local -> S3).
+bootstrap_terraform_init_s3() {
+  local mode="${1:-}"
+  local config_path backend_arg
+  local -a init_extra=()
+
+  config_path="$(bootstrap_write_backend_config_file ".terraform-backend.hcl")"
+  backend_arg="-backend-config=${config_path}"
+  if [ "${mode}" = "migrate" ]; then
+    init_extra=(-migrate-state -force-copy)
+  fi
+
+  echo "Initializing S3 backend: s3://${TF_BACKEND_BUCKET}/${TF_BACKEND_KEY} (region ${TF_BACKEND_REGION})"
+  rm -rf .terraform
+  terraform init -input=false -upgrade -reconfigure "${init_extra[@]}" "${backend_arg}"
+
+  if ! bootstrap_s3_backend_is_configured; then
+    echo "::error::terraform init did not configure the S3 backend. Check TF_BACKEND_* and AWS credentials." >&2
+    return 1
+  fi
+  echo "S3 backend configured."
 }
 
 bootstrap_state_bucket_name() {
@@ -1068,8 +1112,7 @@ tf_init_s3_backend() {
   state_key="$2"
   pushd "${dir}" >/dev/null
   export TF_BACKEND_KEY="${state_key}"
-  mapfile -t backend_args < <(tf_backend_config_args)
-  terraform init -input=false -reconfigure "${backend_args[@]}"
+  bootstrap_terraform_init_s3
   popd >/dev/null
 }
 
@@ -1085,8 +1128,7 @@ maybe_migrate_bootstrap_state() {
   export_bootstrap_outputs "${bootstrap_dir}"
   pushd "${bootstrap_dir}" >/dev/null
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
-  mapfile -t backend_args < <(tf_backend_config_args)
-  terraform init -input=false -migrate-state -force-copy "${backend_args[@]}"
+  bootstrap_terraform_init_s3 migrate
   popd >/dev/null
   bootstrap_enable_state_locking "${bootstrap_dir}"
 }
@@ -1123,9 +1165,20 @@ bootstrap_enable_state_locking() {
   fi
   export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
   echo "Enabling S3 lockfile state locking..."
-  mapfile -t backend_args < <(tf_backend_config_args)
-  terraform init -input=false -reconfigure "${backend_args[@]}"
+  bootstrap_terraform_init_s3
   popd >/dev/null
+}
+
+bootstrap_resolve_s3_backend_env() {
+  if [ -n "${TF_STATE_BUCKET:-}" ]; then
+    bootstrap_apply_backend_env_from_repo_vars
+  elif bootstrap_state_bucket_exists; then
+    bootstrap_set_backend_for_existing_bucket
+  else
+    return 1
+  fi
+  export TF_BACKEND_KEY="${TF_BACKEND_KEY:-global/bootstrap/terraform.tfstate}"
+  return 0
 }
 
 bootstrap_init() {
@@ -1133,23 +1186,38 @@ bootstrap_init() {
   bootstrap_dir="$(bootstrap_dir_abs "${1:-global/bootstrap}")"
   pushd "${bootstrap_dir}" >/dev/null
 
-  if [ -n "${TF_STATE_BUCKET:-}" ]; then
-    bootstrap_apply_backend_env_from_repo_vars
-    export TF_BACKEND_KEY="global/bootstrap/terraform.tfstate"
-    mapfile -t backend_args < <(tf_backend_config_args)
-    # -reconfigure: required after KMS/backend env changes (Terraform 1.7+).
-    terraform init -input=false -reconfigure "${backend_args[@]}"
-  elif bootstrap_state_bucket_exists; then
-    # Bucket exists: init S3 backend (kms_key_id only when alias points to an Enabled dedicated CMK).
-    bootstrap_set_backend_for_existing_bucket
-    mapfile -t backend_args < <(tf_backend_config_args)
-    terraform init -input=false -reconfigure "${backend_args[@]}"
+  if bootstrap_resolve_s3_backend_env; then
+    bootstrap_terraform_init_s3
   else
     # Brand-new bootstrap: no state bucket yet; local state until maybe_migrate_bootstrap_state.
+    rm -rf .terraform
     terraform init -input=false -backend=false
   fi
 
   popd >/dev/null
+}
+
+# Plan/apply in the bootstrap module after backend init (same directory, TF 1.7+).
+bootstrap_run_plan() {
+  local bootstrap_dir="${1:-global/bootstrap}"
+  bootstrap_prepare_apply
+  bootstrap_init "${bootstrap_dir}" || return 1
+  pushd "$(bootstrap_dir_abs "${bootstrap_dir}")" >/dev/null
+  mapfile -t var_args < <(tf_var_args)
+  terraform plan -input=false -no-color "${var_args[@]}"
+  popd >/dev/null
+}
+
+bootstrap_run_apply() {
+  local bootstrap_dir="${1:-global/bootstrap}"
+  bootstrap_prepare_apply
+  bootstrap_init "${bootstrap_dir}" || return 1
+  pushd "$(bootstrap_dir_abs "${bootstrap_dir}")" >/dev/null
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t destroy_args < <(bootstrap_destroy_var_args)
+  terraform apply -input=false -auto-approve -no-color "${var_args[@]}" "${destroy_args[@]}"
+  popd >/dev/null
+  bootstrap_enable_state_locking "${bootstrap_dir}"
 }
 
 # Import bootstrap resources that already exist in AWS but are missing from state
