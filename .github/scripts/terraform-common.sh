@@ -598,10 +598,10 @@ bootstrap_remove_pending_kms() {
     aws kms delete-alias --alias-name "${kms_alias}" --region "${AWS_REGION}"
   fi
 
-  echo "Step 4/4: Schedule KMS key ${key_id} for deletion (10 day window)..."
+  echo "Step 4/4: Schedule KMS key ${key_id} for deletion (7 day window)..."
   aws kms schedule-key-deletion \
     --key-id "${key_id}" \
-    --pending-window-in-days 10 \
+    --pending-window-in-days 7 \
     --region "${AWS_REGION}"
   echo "KMS key ${key_id} is PendingDeletion. Bucket should be gone; key deletes after waiting period."
 }
@@ -2021,10 +2021,10 @@ bootstrap_post_destroy_cleanup() {
       --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
     case "${state}" in
       Enabled)
-        echo "Scheduling KMS key ${key_id} for deletion (10 day window)..."
+        echo "Scheduling KMS key ${key_id} for deletion (7 day window)..."
         aws kms schedule-key-deletion \
           --key-id "${key_id}" \
-          --pending-window-in-days 10 \
+          --pending-window-in-days 7 \
           --region "${AWS_REGION}" 2>/dev/null \
           || echo "::warning::Could not schedule KMS key deletion for ${key_id}." >&2
         ;;
@@ -2034,7 +2034,7 @@ bootstrap_post_destroy_cleanup() {
         bootstrap_wait_kms_key_enabled "${key_id}" || true
         aws kms schedule-key-deletion \
           --key-id "${key_id}" \
-          --pending-window-in-days 10 \
+          --pending-window-in-days 7 \
           --region "${AWS_REGION}" 2>/dev/null \
           || echo "::warning::Could not schedule KMS key deletion for ${key_id}." >&2
         ;;

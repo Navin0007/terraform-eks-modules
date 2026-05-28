@@ -14,7 +14,7 @@ Without this module, other stacks cannot safely share remote state or coordinate
 
 | Resource | Description |
 |----------|-------------|
-| `aws_kms_key` | Customer-managed key with rotation enabled (10-day deletion window); used for remote state, EKS secrets encryption, and encrypted node EBS volumes |
+| `aws_kms_key` | Customer-managed key with rotation enabled (7-day deletion window); used for remote state, EKS secrets encryption, and encrypted node EBS volumes |
 | `aws_kms_alias` | `alias/{project_name}-{environment}-terraform-state` |
 | `aws_s3_bucket` | Remote state bucket (`force_destroy = false`) |
 | `aws_s3_bucket_versioning` | Versioning enabled |
@@ -142,6 +142,18 @@ bootstrap_remove_pending_kms arn:aws:kms:REGION:ACCOUNT:key/KEY-ID
 ```
 
 That re-enables the key briefly, empties the versioned state bucket, deletes the alias, and schedules the key for deletion again.
+
+### Local one-command teardown
+
+```bash
+export TF_PROJECT_NAME=my-project TF_ENVIRONMENT=dev
+export AWS_REGION=us-east-1 AWS_ACCOUNT_ID=123456789012
+export BOOTSTRAP_KMS_KEY_ARN=arn:aws:kms:us-east-1:123456789012:key/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+chmod +x scripts/bootstrap-teardown.sh
+./scripts/bootstrap-teardown.sh          # full teardown
+./scripts/bootstrap-teardown.sh recover # enable key + recreate alias only
+```
 
 ### Full teardown in CI
 
