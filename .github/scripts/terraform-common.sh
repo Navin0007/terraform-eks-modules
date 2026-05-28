@@ -1190,6 +1190,14 @@ maybe_migrate_bootstrap_state() {
 
 # Re-init bootstrap backend with S3 lockfile-based state locking.
 bootstrap_apply_backend_env_from_repo_vars() {
+  if [ -z "${TF_STATE_BUCKET:-}" ]; then
+    return 1
+  fi
+  if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" --region "${AWS_REGION}" 2>/dev/null; then
+    echo "::warning::TF_STATE_BUCKET=${TF_STATE_BUCKET} is not reachable; falling back to local bootstrap init." >&2
+    return 1
+  fi
+
   export TF_BACKEND_BUCKET="${TF_STATE_BUCKET}"
   export TF_BACKEND_DYNAMODB_TABLE="${TF_STATE_DYNAMODB_TABLE}"
   export TF_BACKEND_REGION="${AWS_REGION}"
@@ -1202,6 +1210,7 @@ bootstrap_apply_backend_env_from_repo_vars() {
   elif bootstrap_state_bucket_exists; then
     bootstrap_set_backend_for_existing_bucket
   fi
+  return 0
 }
 
 bootstrap_enable_state_locking() {
@@ -1225,8 +1234,8 @@ bootstrap_enable_state_locking() {
 }
 
 bootstrap_resolve_s3_backend_env() {
-  if [ -n "${TF_STATE_BUCKET:-}" ]; then
-    bootstrap_apply_backend_env_from_repo_vars
+  if [ -n "${TF_STATE_BUCKET:-}" ] && bootstrap_apply_backend_env_from_repo_vars; then
+    :
   elif bootstrap_state_bucket_exists; then
     bootstrap_set_backend_for_existing_bucket
   else
@@ -1292,6 +1301,9 @@ import_existing_bootstrap_resources() {
   local kms_alias="alias/${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-terraform-state"
 
   pushd "${bootstrap_dir}" >/dev/null
+  if ! bootstrap_state_bucket_exists; then
+    terraform init -input=false -backend=false -reconfigure
+  fi
   mapfile -t var_args < <(tf_var_args)
   mapfile -t state_args < <(bootstrap_local_state_args)
 
