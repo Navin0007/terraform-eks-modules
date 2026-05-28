@@ -444,6 +444,51 @@ bootstrap_kms_key_state() {
     --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true
 }
 
+# Try to point bootstrap alias to a specific key.
+# Returns:
+#   0 = success
+#   2 = access denied (caller should try next key)
+#   1 = other error
+bootstrap_try_bind_alias_to_key() {
+  local key_id="$1" kms_alias target out rc
+
+  kms_alias="$(bootstrap_kms_alias_name)"
+
+  if bootstrap_kms_alias_exists; then
+    target="$(aws kms describe-key --key-id "${kms_alias}" \
+      --region "${AWS_REGION}" \
+      --query 'KeyMetadata.KeyId' --output text 2>/dev/null || true)"
+    if [ "${target}" = "${key_id}" ]; then
+      return 0
+    fi
+    out="$(aws kms update-alias \
+      --alias-name "${kms_alias}" \
+      --target-key-id "${key_id}" \
+      --region "${AWS_REGION}" 2>&1)" || rc=$?
+    rc="${rc:-0}"
+    if [ "${rc}" -eq 0 ]; then
+      return 0
+    fi
+  else
+    out="$(aws kms create-alias \
+      --alias-name "${kms_alias}" \
+      --target-key-id "${key_id}" \
+      --region "${AWS_REGION}" 2>&1)" || rc=$?
+    rc="${rc:-0}"
+    if [ "${rc}" -eq 0 ]; then
+      return 0
+    fi
+  fi
+
+  if [[ "${out}" == *"AccessDenied"* ]] || [[ "${out}" == *"AccessDeniedException"* ]]; then
+    echo "Skipping key ${key_id}: alias permission denied for ${kms_alias}." >&2
+    return 2
+  fi
+
+  echo "::warning::Failed binding alias ${kms_alias} to ${key_id}: ${out}" >&2
+  return 1
+}
+
 # Return first Enabled KMS key in the account/region.
 bootstrap_discover_any_enabled_kms_key() {
   local key_id state
@@ -461,7 +506,7 @@ bootstrap_discover_any_enabled_kms_key() {
   return 1
 }
 
-# Apply/plan: reuse alias key if Enabled; otherwise pick any Enabled key and map alias to it.
+# Apply/plan: reuse alias key if Enabled; otherwise try binding alias to enabled keys.
 bootstrap_resolve_reusable_bootstrap_kms_key() {
   local key_id kms_alias state
 
@@ -479,13 +524,20 @@ bootstrap_resolve_reusable_bootstrap_kms_key() {
     echo "Alias ${kms_alias} points to ${key_id} (state=${state}); selecting another Enabled key." >&2
   fi
 
-  if ! key_id="$(bootstrap_discover_any_enabled_kms_key 2>/dev/null)"; then
-    echo "No Enabled KMS key found; apply will create aws_kms_key.terraform_state." >&2
-    return 1
-  fi
+  while read -r key_id; do
+    [ -z "${key_id}" ] && continue
+    state="$(bootstrap_kms_key_state "${key_id}")"
+    [ "${state}" = "Enabled" ] || continue
 
-  printf '%s\n' "${key_id}"
-  return 0
+    if bootstrap_try_bind_alias_to_key "${key_id}"; then
+      printf '%s\n' "${key_id}"
+      return 0
+    fi
+  done < <(aws kms list-keys --region "${AWS_REGION}" \
+    --query 'Keys[].KeyId' --output text 2>/dev/null | tr '\t' '\n')
+
+  echo "No reusable KMS key with alias permissions; apply will create aws_kms_key.terraform_state." >&2
+  return 1
 }
 
 # Destroy/recovery: find bootstrap CMK by alias, bucket SSE, or description (any state).
@@ -608,27 +660,18 @@ bootstrap_ensure_kms_alias() {
     fi
   fi
 
+  if ! bootstrap_try_bind_alias_to_key "${key_id}"; then
+    echo "::warning::Unable to bind ${kms_alias} to key ${key_id}; skipping key reuse." >&2
+    return 1
+  fi
+
   if bootstrap_kms_alias_exists; then
     target="$(aws kms describe-key --key-id "${kms_alias}" \
       --region "${AWS_REGION}" \
-      --query 'KeyMetadata.KeyId' --output text)"
-    if [ "${target}" = "${key_id}" ]; then
-      echo "KMS alias ${kms_alias} already points to key ${key_id}."
-      return 0
-    fi
-    echo "Updating KMS alias ${kms_alias} -> key ${key_id} (was ${target})..."
-    aws kms update-alias \
-      --alias-name "${kms_alias}" \
-      --target-key-id "${key_id}" \
-      --region "${AWS_REGION}"
-    return 0
+      --query 'KeyMetadata.KeyId' --output text 2>/dev/null || true)"
+    echo "KMS alias ${kms_alias} points to key ${target}."
   fi
-
-  echo "Creating KMS alias ${kms_alias} -> key ${key_id}..."
-  aws kms create-alias \
-    --alias-name "${kms_alias}" \
-    --target-key-id "${key_id}" \
-    --region "${AWS_REGION}"
+  return 0
 }
 
 # Recover bootstrap KMS after failed destroy: cancel pending deletion and restore alias.
@@ -717,7 +760,6 @@ bootstrap_reconcile_orphan_kms() {
   tf_common_vars
 
   if key_id="$(bootstrap_resolve_reusable_bootstrap_kms_key 2>/dev/null)"; then
-    bootstrap_ensure_kms_alias "${key_id}" || true
     echo "Using bootstrap CMK ${key_id} (alias $(bootstrap_kms_alias_name), Enabled)."
     export TF_BACKEND_KMS_KEY_ID="${key_id}"
     export TF_STATE_KMS_KEY_ARN
