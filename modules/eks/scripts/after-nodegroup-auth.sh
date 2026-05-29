@@ -21,7 +21,15 @@ after_nodegroup_auth() {
     --output text)"
 
   if [ "${auth_mode}" = "API" ]; then
-    echo "API mode: scaling node group (EC2_LINUX access entry; no aws-auth)..."
+    echo "API mode: waiting for node group ACTIVE (scale 0), then EKS access entry, then scale-out..."
+    aws eks wait nodegroup-active \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${region}"
+
+    CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
+      bash "${script_dir}/wait-for-node-access-entry.sh"
+
     aws eks update-nodegroup-config \
       --cluster-name "${cluster_name}" \
       --nodegroup-name "${nodegroup_name}" \

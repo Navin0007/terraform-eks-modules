@@ -560,6 +560,32 @@ The CI auth migration script creates the EC2_LINUX entry in AWS before apply. If
 
 ---
 
+## Issue 20: API mode kubelet Unauthorized (Ready=0/0) with pre-created access entry
+
+**Symptoms**
+
+- `authMode`: `API`, EC2_LINUX access entry exists for node role
+- Node group `ACTIVE`, `desired: 2`, but `Ready=0/0`
+- Kubelet: `Unable to register node with API server: Unauthorized`
+- IAM instance profile and node role are correct
+
+**Cause**
+
+For **managed node groups**, EKS creates the EC2_LINUX access entry when the **node group** is created. If CI or Terraform **pre-creates** the entry before the node group exists, EKS does not wire managed nodes correctly and kubelets stay Unauthorized.
+
+**Fix**
+
+| Change | File |
+|--------|------|
+| Do not pre-create access entries in CI | `ensure-node-cluster-auth.sh` |
+| Do not manage `aws_eks_access_entry` in Terraform | `modules/eks/access.tf`, `create_node_access_entry=false` |
+| Wait for EKS-created entry after node group at scale 0 | `wait-for-node-access-entry.sh`, `after-nodegroup-auth.sh` |
+| Reset failed join (delete NG + entry, recreate) | `prepare-api-managed-node-auth.sh` |
+
+Re-run **apply** with `dev_eks_phase: nodes`; CI will reset the failed node group and access entry, then recreate cleanly.
+
+---
+
 | Symptom | First reference |
 |--------|------------------|
 | KMS alias NotFound on bootstrap init | §1a — `bootstrap_remote_backend_ready` |
@@ -574,7 +600,7 @@ The CI auth migration script creates the EC2_LINUX entry in AWS before apply. If
 | Access entry mode error | `upgrade-eks-authentication-mode.sh` L22–28 |
 | Policy on EC2_LINUX entry | `modules/eks/access.tf` — entry only, no `associate-access-policy` |
 | Join / SG (not Unauthorized) | `cluster_security_group_rules.tf` L6–31 |
-| **Kubelet Unauthorized** | `after-nodegroup-auth.sh`, `wait-for-ready-nodes.sh`, `migrate-cluster-auth-to-api.sh` |
+| **Kubelet Unauthorized (API mode)** | Issue 20 — pre-created access entry; `prepare-api-managed-node-auth.sh` |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
 | Stale failed node group | `terraform-common.sh` L476–522 |

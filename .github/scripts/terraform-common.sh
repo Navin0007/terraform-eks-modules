@@ -1813,52 +1813,29 @@ migrate_dev_cluster_to_api_node_auth() {
   esac
 
   CLUSTER_NAME="${cluster_name}" NODEGROUP_NAME="general" AWS_REGION="${AWS_REGION}" \
+    bash "${repo_root}/modules/eks/scripts/prepare-api-managed-node-auth.sh" || true
+
+  CLUSTER_NAME="${cluster_name}" NODEGROUP_NAME="general" AWS_REGION="${AWS_REGION}" \
     bash "${repo_root}/modules/eks/scripts/recycle-nodegroup-instances.sh" || true
 }
 
-# Import access entry after CI scripts create it (avoids 409 on apply).
+# Remove Terraform state for EKS-managed access entry (no longer in configuration).
 import_eks_node_access_to_state() {
   local dev_abs="${1:-environments/dev}"
-  local cluster_name node_role_arn entry_addr
+  local did_pushd=false
+
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
-  tf_export_dev_vars
-  cluster_name="$(eks_cluster_name)"
-  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
-  entry_addr="$(dev_eks_state_prefix).aws_eks_access_entry.node[0]"
 
-  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
-    return 0
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
   fi
 
-  pushd "${dev_abs}" >/dev/null
-  mapfile -t var_args < <(tf_var_args)
-  mapfile -t dev_args < <(tf_dev_extra_var_args)
+  terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" 2>/dev/null || true
+  echo "Node access entry is EKS-managed for managed node groups (not imported into Terraform state)."
 
-  if terraform state show -no-color "${entry_addr}" &>/dev/null; then
-    echo "Node access entry already in Terraform state."
-    popd >/dev/null
-    return 0
-  fi
-
-  if ! aws eks describe-access-entry \
-    --cluster-name "${cluster_name}" \
-    --principal-arn "${node_role_arn}" \
-    --region "${AWS_REGION}" &>/dev/null; then
-    echo "No node access entry in AWS; Terraform will create it on apply."
-    popd >/dev/null
-    return 0
-  fi
-
-  echo "Importing existing node access entry into Terraform state..."
-  if ! terraform import -input=false "${var_args[@]}" "${dev_args[@]}" \
-    "${entry_addr}" "${cluster_name}:${node_role_arn}"; then
-    echo "::error::Failed to import ${entry_addr} (exists in AWS). Re-run will 409 on create." >&2
-    popd >/dev/null
-    return 1
-  fi
-
-  echo "Imported ${entry_addr}."
-  popd >/dev/null
+  [ "${did_pushd}" = true ] && popd >/dev/null
 }
 
 # Delete managed node groups that still use a custom launch template or instances without an IAM profile.
@@ -2009,8 +1986,7 @@ delete_failed_eks_node_groups() {
   esac
 }
 
-# Drop stale state addresses from older module versions. In API mode, keep the
-# EC2_LINUX access entry — cleanup must not remove it after import.
+# Drop stale state addresses from older module versions.
 cleanup_stale_eks_auth_state() {
   local dev_abs="${1:-environments/dev}"
   local did_pushd=false
@@ -2028,6 +2004,8 @@ cleanup_stale_eks_auth_state() {
   terraform state rm "$(dev_eks_state_prefix).aws_launch_template.node_group[\"general\"]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).kubernetes_config_map_v1.aws_auth[0]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" 2>/dev/null || true
+  # Managed node groups: access entry is EKS-managed, not Terraform-managed.
+  terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
 
   if eks_cluster_exists_in_aws "${cluster_name}"; then
     auth_mode="$(aws eks describe-cluster \
@@ -2035,15 +2013,7 @@ cleanup_stale_eks_auth_state() {
       --region "${AWS_REGION}" \
       --query 'cluster.accessConfig.authenticationMode' \
       --output text 2>/dev/null || echo "unknown")"
-    case "${auth_mode}" in
-      API_AND_CONFIG_MAP | CONFIG_MAP)
-        echo "Auth mode ${auth_mode}: removing stale node access entry from state (managed nodes use aws-auth)."
-        terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
-        ;;
-      API)
-        echo "Auth mode API: keeping node access entry in state (required for EC2_LINUX nodes)."
-        ;;
-    esac
+    echo "Auth mode ${auth_mode}: node access entry is EKS-managed for API mode managed node groups."
   fi
 
   [ "${did_pushd}" = true ] && popd >/dev/null
@@ -2754,13 +2724,6 @@ import_existing_dev_resources() {
   fi
 
   import_if_missing "${eks_prefix}.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
-
-  if aws eks describe-access-entry \
-    --cluster-name "${cluster_name}" \
-    --principal-arn "${node_role_arn}" \
-    --region "${AWS_REGION}" &>/dev/null; then
-    import_if_missing "${eks_prefix}.aws_eks_access_entry.node[0]" "${cluster_name}:${node_role_arn}" true
-  fi
 
   local addon_name addon_addr
   for addon_name in kube-proxy coredns aws-ebs-csi-driver; do

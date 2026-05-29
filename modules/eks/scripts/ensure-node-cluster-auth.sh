@@ -20,18 +20,8 @@ ensure_node_cluster_auth() {
 
   case "${auth_mode}" in
     API)
-      echo "API mode: ensuring EC2_LINUX access entry for node role..."
-      if ! aws eks describe-access-entry \
-        --cluster-name "${cluster_name}" \
-        --principal-arn "${node_role_arn}" \
-        --region "${region}" &>/dev/null; then
-        aws eks create-access-entry \
-          --cluster-name "${cluster_name}" \
-          --principal-arn "${node_role_arn}" \
-          --type EC2_LINUX \
-          --region "${region}"
-      fi
-      echo "Node IAM permissions are via role policy attachments (not EKS access policies on EC2_LINUX entries)."
+      echo "API mode: managed node groups — EKS creates the EC2_LINUX access entry when the node group is created."
+      echo "Do not pre-create access entries here (causes kubelet Unauthorized on join)."
       ;;
     API_AND_CONFIG_MAP | CONFIG_MAP)
       CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \

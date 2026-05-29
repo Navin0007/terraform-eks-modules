@@ -92,8 +92,8 @@ module "eks" {
   enable_node_groups = local.eks_nodes_enabled
   node_groups        = local.eks_nodes_enabled ? var.node_groups : {}
 
-  # Dev uses API-only node auth (EC2_LINUX access entry); migrated in CI before apply.
-  create_node_access_entry = local.eks_nodes_enabled
+  # Managed node groups: EKS auto-creates EC2_LINUX access entry in API mode (see modules/eks/access.tf).
+  create_node_access_entry = false
 
   endpoint_private_access = true
   # Public endpoint required so CI/Terraform can apply the aws-auth ConfigMap (nodes still use the private endpoint).
