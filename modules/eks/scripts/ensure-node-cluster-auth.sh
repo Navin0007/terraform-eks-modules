@@ -31,8 +31,7 @@ ensure_node_cluster_auth() {
           --type EC2_LINUX \
           --region "${region}"
       fi
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        bash "${script_dir}/ensure-node-access-policy.sh"
+      echo "Node IAM permissions are via role policy attachments (not EKS access policies on EC2_LINUX entries)."
       ;;
     API_AND_CONFIG_MAP | CONFIG_MAP)
       CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \

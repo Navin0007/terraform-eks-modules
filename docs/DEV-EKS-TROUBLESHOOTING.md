@@ -517,26 +517,24 @@ Prepare order: `upgrade_eks_authentication_mode_if_needed` → `migrate_dev_clus
 
 ---
 
-## Issue 18: API mode + EC2_LINUX entry but still Unauthorized
+## Issue 18: AssociateAccessPolicy fails on EC2_LINUX access entry
 
 **Symptoms**
 
-- `authMode`: `API`, EC2_LINUX access entry present
-- `kubernetesGroups` may show only `system:nodes` (missing `system:bootstrappers` on describe)
-- `CreateAccessEntry` 409 in Terraform (entry created by CI script, not imported)
-- Kubelet still `Unauthorized`
+- CI fails after auth migration: `AssociateAccessPolicy ... can only be performed on Access Entries with a type of "STANDARD"`
+- Or Terraform apply fails on `aws_eks_access_policy_association.node`
 
 **Cause**
 
-EC2_LINUX access entries also need **`AmazonEKSNodegroupPolicy`** associated (`aws eks associate-access-policy`). Without it, the API authorizer rejects kubelet registration even when the entry exists.
+`AssociateAccessPolicy` / `AmazonEKSNodegroupPolicy` applies only to **STANDARD** access entries (humans/service roles). **EC2_LINUX** entries used for worker nodes cannot have EKS cluster access policies attached. Node AWS permissions belong on the **IAM node role** (`AmazonEKSWorkerNodePolicy`, `AmazonEKS_CNI_Policy`, etc.).
 
 **Fix**
 
 | Change | File |
 |--------|------|
-| `aws_eks_access_policy_association` for `AmazonEKSNodegroupPolicy` | `modules/eks/access.tf` |
-| CI associates policy + imports entry/policy into state | `ensure-node-access-policy.sh`, `import_eks_node_access_to_state` |
-| Node group waits for entry + policy before create | `modules/eks/node_groups.tf` |
+| Keep `aws_eks_access_entry` (EC2_LINUX) only; remove policy association | `modules/eks/access.tf` |
+| Do not call `associate-access-policy` in CI | `ensure-node-cluster-auth.sh` |
+| Import access entry only (not policy) | `import_eks_node_access_to_state` |
 
 ---
 
@@ -554,7 +552,7 @@ EC2_LINUX access entries also need **`AmazonEKSNodegroupPolicy`** associated (`a
 | KMS / volume errors (EKS nodes) | `global/bootstrap/main.tf` L49–84 |
 | Cluster 409 / replace | `modules/eks/main.tf` L32–50 |
 | Access entry mode error | `upgrade-eks-authentication-mode.sh` L22–28 |
-| Policy on EC2_LINUX entry | `modules/eks/access.tf` L1–10 |
+| Policy on EC2_LINUX entry | `modules/eks/access.tf` — entry only, no `associate-access-policy` |
 | Join / SG (not Unauthorized) | `cluster_security_group_rules.tf` L6–31 |
 | **Kubelet Unauthorized** | `after-nodegroup-auth.sh`, `wait-for-ready-nodes.sh`, `migrate-cluster-auth-to-api.sh` |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |

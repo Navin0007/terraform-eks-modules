@@ -1816,15 +1816,14 @@ migrate_dev_cluster_to_api_node_auth() {
     bash "${repo_root}/modules/eks/scripts/recycle-nodegroup-instances.sh" || true
 }
 
-# Import access entry + policy association after CI scripts create them (avoids 409 on apply).
+# Import access entry after CI scripts create it (avoids 409 on apply).
 import_eks_node_access_to_state() {
   local dev_abs="${1:-environments/dev}"
-  local cluster_name node_role_arn policy_arn
+  local cluster_name node_role_arn
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
   cluster_name="$(eks_cluster_name)"
   node_role_arn="$(node_iam_role_arn "${cluster_name}")"
-  policy_arn="arn:aws:eks::aws:cluster-access-policy/AmazonEKSNodegroupPolicy"
 
   if ! eks_cluster_exists_in_aws "${cluster_name}"; then
     return 0
@@ -1842,20 +1841,6 @@ import_eks_node_access_to_state() {
       echo "Importing node access entry into Terraform state..."
       terraform import -input=false "${var_args[@]}" "${dev_args[@]}" \
         "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" "${cluster_name}:${node_role_arn}" || true
-    fi
-  fi
-
-  if aws eks list-associated-access-policies \
-    --cluster-name "${cluster_name}" \
-    --principal-arn "${node_role_arn}" \
-    --region "${AWS_REGION}" \
-    --query "associatedAccessPolicies[?policyArn=='${policy_arn}'].policyArn | [0]" \
-    --output text 2>/dev/null | grep -q "${policy_arn}"; then
-    if ! terraform state show -no-color "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" &>/dev/null; then
-      echo "Importing node access policy association into Terraform state..."
-      terraform import -input=false "${var_args[@]}" "${dev_args[@]}" \
-        "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" \
-        "${cluster_name}#${node_role_arn}#${policy_arn}" || true
     fi
   fi
 
@@ -2024,6 +2009,7 @@ cleanup_stale_eks_auth_state() {
 
   terraform state rm "$(dev_eks_state_prefix).aws_launch_template.node_group[\"general\"]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).kubernetes_config_map_v1.aws_auth[0]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
 
   [ "${did_pushd}" = true ] && popd >/dev/null
@@ -2191,19 +2177,14 @@ diagnose_node_join_failure() {
     if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
       echo "::error::Node access entry present in API_AND_CONFIG_MAP — API auth is tried first and often causes Unauthorized."
     fi
-    echo "--- associated access policies for node role ---"
+    echo "--- associated access policies for node role (EC2_LINUX entries cannot use these) ---"
     aws eks list-associated-access-policies \
       --cluster-name "${cluster_name}" \
       --principal-arn "${node_role_arn}" \
       --region "${AWS_REGION}" \
       --output json 2>/dev/null || echo "(none or could not list)"
-    if [ "${auth_mode}" = "API" ] && ! aws eks list-associated-access-policies \
-      --cluster-name "${cluster_name}" \
-      --principal-arn "${node_role_arn}" \
-      --region "${AWS_REGION}" \
-      --query "associatedAccessPolicies[?policyArn=='arn:aws:eks::aws:cluster-access-policy/AmazonEKSNodegroupPolicy']" \
-      --output text 2>/dev/null | grep -q AmazonEKSNodegroupPolicy; then
-      echo "::error::AmazonEKSNodegroupPolicy not associated — nodes stay Unauthorized in API mode."
+    if [ "${auth_mode}" = "API" ]; then
+      echo "API + EC2_LINUX: node join uses the access entry only; IAM worker/CNI/ECR policies attach to the node role."
     fi
   else
     if [ "${auth_mode}" = "API" ]; then
@@ -2745,19 +2726,6 @@ import_existing_dev_resources() {
     --principal-arn "${node_role_arn}" \
     --region "${AWS_REGION}" &>/dev/null; then
     import_if_missing "${eks_prefix}.aws_eks_access_entry.node[0]" "${cluster_name}:${node_role_arn}" true
-  fi
-
-  local nodegroup_policy_arn="arn:aws:eks::aws:cluster-access-policy/AmazonEKSNodegroupPolicy"
-  if aws eks list-associated-access-policies \
-    --cluster-name "${cluster_name}" \
-    --principal-arn "${node_role_arn}" \
-    --region "${AWS_REGION}" \
-    --query "associatedAccessPolicies[?policyArn=='${nodegroup_policy_arn}'].policyArn | [0]" \
-    --output text 2>/dev/null | grep -q "${nodegroup_policy_arn}"; then
-    import_if_missing \
-      "${eks_prefix}.aws_eks_access_policy_association.node[0]" \
-      "${cluster_name}#${node_role_arn}#${nodegroup_policy_arn}" \
-      true
   fi
 
   local addon_name addon_addr

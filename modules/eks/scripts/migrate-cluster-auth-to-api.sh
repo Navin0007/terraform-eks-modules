@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# API-only auth: migrate cluster mode; access entry + policy are ensured separately.
+# API-only auth: migrate cluster mode; EC2_LINUX access entry is ensured separately.
 set -euo pipefail
 
 migrate_cluster_auth_to_api() {

@@ -49,7 +49,6 @@ resource "aws_eks_node_group" "main" {
     aws_vpc_security_group_ingress_rule.control_plane_from_cluster_sg_https,
     aws_vpc_security_group_egress_rule.control_plane_to_cluster_sg_kubelet,
     aws_eks_access_entry.node,
-    aws_eks_access_policy_association.node,
   ]
 }
 
