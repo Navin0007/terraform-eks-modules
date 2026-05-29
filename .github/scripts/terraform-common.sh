@@ -1772,18 +1772,21 @@ upgrade_eks_authentication_mode_if_needed() {
     bash "${repo_root}/modules/eks/scripts/upgrade-eks-authentication-mode.sh"
 }
 
-# API_AND_CONFIG_MAP + aws-auth still yields Unauthorized on managed nodes; use API + EC2_LINUX.
-migrate_dev_cluster_to_api_node_auth() {
+# API mode is irreversible and breaks managed node groups. Recreate the cluster with
+# API_AND_CONFIG_MAP (see environments/dev authentication_mode).
+recover_dev_cluster_if_api_mode() {
+  local dev_abs="${1:-environments/dev}"
+  local cluster_name auth_mode node_role_arn repo_root did_pushd=false
+  local ng addr
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
-  local cluster_name node_role_arn repo_root auth_mode
   cluster_name="$(eks_cluster_name)"
+  repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
   if ! eks_cluster_exists_in_aws "${cluster_name}"; then
     return 0
   fi
-
-  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
-  repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
   auth_mode="$(aws eks describe-cluster \
     --name "${cluster_name}" \
@@ -1791,32 +1794,58 @@ migrate_dev_cluster_to_api_node_auth() {
     --query 'cluster.accessConfig.authenticationMode' \
     --output text)"
 
-  case "${auth_mode}" in
-    API)
-      echo "Cluster auth mode is API; ensuring EC2_LINUX access entry..."
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
-        bash "${repo_root}/modules/eks/scripts/ensure-node-cluster-auth.sh"
-      ;;
-    API_AND_CONFIG_MAP)
-      echo "Migrating dev cluster from API_AND_CONFIG_MAP to API (managed nodes use EC2_LINUX access entries)..."
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
-        bash "${repo_root}/modules/eks/scripts/migrate-cluster-auth-to-api.sh"
-      ;;
-    CONFIG_MAP)
-      echo "Cluster still CONFIG_MAP; upgrade step must run before API migration."
-      return 0
-      ;;
-    *)
-      echo "::warning::Unknown authentication mode ${auth_mode}; skipping API migration."
-      return 0
-      ;;
-  esac
+  if [ "${auth_mode}" != "API" ]; then
+    return 0
+  fi
 
-  CLUSTER_NAME="${cluster_name}" NODEGROUP_NAME="general" AWS_REGION="${AWS_REGION}" \
-    bash "${repo_root}/modules/eks/scripts/prepare-api-managed-node-auth.sh" || true
+  echo "::warning::Cluster ${cluster_name} is in API auth mode (irreversible)."
+  echo "Managed node groups require API_AND_CONFIG_MAP. Deleting cluster for recreation..."
 
-  CLUSTER_NAME="${cluster_name}" NODEGROUP_NAME="general" AWS_REGION="${AWS_REGION}" \
-    bash "${repo_root}/modules/eks/scripts/recycle-nodegroup-instances.sh" || true
+  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
+
+  for ng in $(aws eks list-nodegroups \
+    --cluster-name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroups[]' \
+    --output text 2>/dev/null); do
+    [ -z "${ng}" ] || [ "${ng}" = "None" ] && continue
+    echo "Deleting node group ${ng}..."
+    aws eks delete-nodegroup \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${ng}" \
+      --region "${AWS_REGION}" || true
+    aws eks wait nodegroup-deleted \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${ng}" \
+      --region "${AWS_REGION}" || true
+  done
+
+  CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+    bash "${repo_root}/modules/eks/scripts/delete-node-access-entry.sh" || true
+
+  echo "Deleting EKS cluster ${cluster_name}..."
+  aws eks delete-cluster --name "${cluster_name}" --region "${AWS_REGION}"
+  aws eks wait cluster-deleted --name "${cluster_name}" --region "${AWS_REGION}"
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  while IFS= read -r addr; do
+    [ -z "${addr}" ] && continue
+    echo "Removing ${addr} from Terraform state..."
+    terraform state rm -no-color "${addr}" || true
+  done < <(terraform state list -no-color 2>/dev/null | grep -E '^module\.eks\[0\]\.' || true)
+
+  [ "${did_pushd}" = true ] && popd >/dev/null
+
+  echo "EKS cluster removed. This apply will recreate it with API_AND_CONFIG_MAP."
+}
+
+# Deprecated: do not migrate to API mode (breaks managed node groups).
+migrate_dev_cluster_to_api_node_auth() {
+  recover_dev_cluster_if_api_mode "${1:-environments/dev}"
 }
 
 # Remove Terraform state for EKS-managed access entry (no longer in configuration).
@@ -2651,7 +2680,6 @@ dev_stack_prepare() {
 
   recover_eks_cluster_before_apply "${dev_abs}"
   upgrade_eks_authentication_mode_if_needed
-  migrate_dev_cluster_to_api_node_auth
   cleanup_stale_eks_auth_state "${dev_abs}"
   import_eks_node_access_to_state "${dev_abs}"
   apply_eks_public_endpoint_if_needed "${dev_abs}"

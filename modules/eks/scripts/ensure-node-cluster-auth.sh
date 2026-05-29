@@ -20,8 +20,8 @@ ensure_node_cluster_auth() {
 
   case "${auth_mode}" in
     API)
-      echo "API mode: managed node groups — EKS creates the EC2_LINUX access entry when the node group is created."
-      echo "Do not pre-create access entries here (causes kubelet Unauthorized on join)."
+      echo "::error::API authentication mode is unsupported for managed node groups (use API_AND_CONFIG_MAP + aws-auth)." >&2
+      return 1
       ;;
     API_AND_CONFIG_MAP | CONFIG_MAP)
       CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Node group at scale 0, remove access entries, scale out, verify nodes Ready.
+# Node group at scale 0, remove access entries, refresh aws-auth, scale out, verify Ready.
 set -euo pipefail
 
 after_nodegroup_auth() {
@@ -21,27 +21,9 @@ after_nodegroup_auth() {
     --output text)"
 
   if [ "${auth_mode}" = "API" ]; then
-    echo "API mode: waiting for node group ACTIVE (scale 0), then EKS access entry, then scale-out..."
-    aws eks wait nodegroup-active \
-      --cluster-name "${cluster_name}" \
-      --nodegroup-name "${nodegroup_name}" \
-      --region "${region}"
-
-    CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-      bash "${script_dir}/wait-for-node-access-entry.sh"
-
-    aws eks update-nodegroup-config \
-      --cluster-name "${cluster_name}" \
-      --nodegroup-name "${nodegroup_name}" \
-      --region "${region}" \
-      --scaling-config "minSize=${min_size},maxSize=${max_size},desiredSize=${desired_size}"
-    aws eks wait nodegroup-active \
-      --cluster-name "${cluster_name}" \
-      --nodegroup-name "${nodegroup_name}" \
-      --region "${region}"
-    CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-      DESIRED_SIZE="${desired_size}" bash "${script_dir}/wait-for-ready-nodes.sh"
-    return 0
+    echo "::error::Cluster is in API authentication mode; managed node groups require API_AND_CONFIG_MAP." >&2
+    echo "::error::Re-run apply — CI will recreate the cluster (recover_dev_cluster_if_api_mode)." >&2
+    exit 1
   fi
 
   echo "Waiting for node group ${nodegroup_name} to become ACTIVE (scale 0)..."
@@ -70,25 +52,9 @@ after_nodegroup_auth() {
     --nodegroup-name "${nodegroup_name}" \
     --region "${region}"
 
-  auth_mode="$(aws eks describe-cluster \
-    --name "${cluster_name}" \
-    --region "${region}" \
-    --query 'cluster.accessConfig.authenticationMode' \
-    --output text 2>/dev/null || echo "API_AND_CONFIG_MAP")"
-
-  if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ] || [ "${auth_mode}" = "CONFIG_MAP" ]; then
-    if ! CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-      DESIRED_SIZE="${desired_size}" bash "${script_dir}/wait-for-ready-nodes.sh"; then
-      echo "aws-auth path did not produce Ready nodes; migrating to API + EC2_LINUX access entry..."
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        bash "${script_dir}/migrate-cluster-auth-to-api.sh"
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        DESIRED_SIZE="${desired_size}" bash "${script_dir}/wait-for-ready-nodes.sh"
-    fi
-  else
-    CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-      DESIRED_SIZE="${desired_size}" bash "${script_dir}/wait-for-ready-nodes.sh"
-  fi
+  CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
+    NODEGROUP_NAME="${nodegroup_name}" DESIRED_SIZE="${desired_size}" \
+    bash "${script_dir}/wait-for-ready-nodes.sh"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

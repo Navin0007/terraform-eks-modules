@@ -586,6 +586,31 @@ Re-run **apply** with `dev_eks_phase: nodes`; CI will reset the failed node grou
 
 ---
 
+## Issue 21: API mode cluster — managed nodes never join (recreate cluster)
+
+**Symptoms**
+
+- `authMode`: `API` (irreversible; cannot return to `API_AND_CONFIG_MAP`)
+- EC2_LINUX access entry exists; kubelet still `Unauthorized`
+- Scale-out times out `Ready=0/0`
+
+**Cause**
+
+**API** mode ignores `aws-auth`. EC2_LINUX access entries do not work for **managed node groups** in this setup. Managed nodes need **API_AND_CONFIG_MAP** + `aws-auth` mapRoles (and **no** node access entry).
+
+**Fix**
+
+1. `authentication_mode = "API_AND_CONFIG_MAP"` on cluster create (`environments/dev/main.tf`)
+2. Stop migrating to API (`migrate-cluster-auth-to-api.sh` removed from CI)
+3. On **apply only**, `recover_dev_cluster_if_api_mode` deletes the API-mode cluster and clears `module.eks[0]` state
+4. Same apply recreates the cluster and runs the aws-auth node join flow
+
+**Do not** import `aws_eks_access_entry` — that resource is not used.
+
+Re-run **apply** with `dev_eks_phase: all` or run cluster then nodes (first apply recreates cluster; second apply may be needed if timeout).
+
+---
+
 | Symptom | First reference |
 |--------|------------------|
 | KMS alias NotFound on bootstrap init | §1a — `bootstrap_remote_backend_ready` |
@@ -600,7 +625,7 @@ Re-run **apply** with `dev_eks_phase: nodes`; CI will reset the failed node grou
 | Access entry mode error | `upgrade-eks-authentication-mode.sh` L22–28 |
 | Policy on EC2_LINUX entry | `modules/eks/access.tf` — entry only, no `associate-access-policy` |
 | Join / SG (not Unauthorized) | `cluster_security_group_rules.tf` L6–31 |
-| **Kubelet Unauthorized (API mode)** | Issue 20 — pre-created access entry; `prepare-api-managed-node-auth.sh` |
+| **Kubelet Unauthorized (API mode)** | Issue 21 — recreate cluster; `recover_dev_cluster_if_api_mode` |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
 | Stale failed node group | `terraform-common.sh` L476–522 |

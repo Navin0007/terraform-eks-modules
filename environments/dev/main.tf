@@ -92,7 +92,8 @@ module "eks" {
   enable_node_groups = local.eks_nodes_enabled
   node_groups        = local.eks_nodes_enabled ? var.node_groups : {}
 
-  # Managed node groups: EKS auto-creates EC2_LINUX access entry in API mode (see modules/eks/access.tf).
+  # Managed node groups use aws-auth (API_AND_CONFIG_MAP). Do not migrate to API mode.
+  authentication_mode = "API_AND_CONFIG_MAP"
   create_node_access_entry = false
 
   endpoint_private_access = true
