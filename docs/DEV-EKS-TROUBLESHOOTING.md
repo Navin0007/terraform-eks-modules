@@ -538,7 +538,27 @@ Prepare order: `upgrade_eks_authentication_mode_if_needed` → `migrate_dev_clus
 
 ---
 
-## Symptom → first place to look
+## Issue 19: CreateAccessEntry 409 — access entry already in AWS
+
+**Symptoms**
+
+- Apply fails: `ResourceInUseException: The specified access entry resource is already in use`
+- Diagnostics show EC2_LINUX entry exists for the node role
+- Terraform plan wanted to **create** `aws_eks_access_entry.node[0]`
+
+**Cause**
+
+The CI auth migration script creates the EC2_LINUX entry in AWS before apply. If it is not imported into state, Terraform tries to create it again (409). A prior bug also **removed** the entry from state in `cleanup_stale_eks_auth_state` after import when auth mode was API.
+
+**Fix**
+
+| Change | File |
+|--------|------|
+| Import access entry when it exists in AWS | `import_eks_node_access_to_state` |
+| Do not `state rm` access entry in **API** mode | `cleanup_stale_eks_auth_state` |
+| Run cleanup before import; re-import before apply | `dev_stack_prepare`, workflow Dev apply step |
+
+---
 
 | Symptom | First reference |
 |--------|------------------|

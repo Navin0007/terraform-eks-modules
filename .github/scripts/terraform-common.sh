@@ -1819,11 +1819,12 @@ migrate_dev_cluster_to_api_node_auth() {
 # Import access entry after CI scripts create it (avoids 409 on apply).
 import_eks_node_access_to_state() {
   local dev_abs="${1:-environments/dev}"
-  local cluster_name node_role_arn
+  local cluster_name node_role_arn entry_addr
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
   cluster_name="$(eks_cluster_name)"
   node_role_arn="$(node_iam_role_arn "${cluster_name}")"
+  entry_addr="$(dev_eks_state_prefix).aws_eks_access_entry.node[0]"
 
   if ! eks_cluster_exists_in_aws "${cluster_name}"; then
     return 0
@@ -1833,17 +1834,30 @@ import_eks_node_access_to_state() {
   mapfile -t var_args < <(tf_var_args)
   mapfile -t dev_args < <(tf_dev_extra_var_args)
 
-  if aws eks describe-access-entry \
+  if terraform state show -no-color "${entry_addr}" &>/dev/null; then
+    echo "Node access entry already in Terraform state."
+    popd >/dev/null
+    return 0
+  fi
+
+  if ! aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
     --region "${AWS_REGION}" &>/dev/null; then
-    if ! terraform state show -no-color "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" &>/dev/null; then
-      echo "Importing node access entry into Terraform state..."
-      terraform import -input=false "${var_args[@]}" "${dev_args[@]}" \
-        "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" "${cluster_name}:${node_role_arn}" || true
-    fi
+    echo "No node access entry in AWS; Terraform will create it on apply."
+    popd >/dev/null
+    return 0
   fi
 
+  echo "Importing existing node access entry into Terraform state..."
+  if ! terraform import -input=false "${var_args[@]}" "${dev_args[@]}" \
+    "${entry_addr}" "${cluster_name}:${node_role_arn}"; then
+    echo "::error::Failed to import ${entry_addr} (exists in AWS). Re-run will 409 on create." >&2
+    popd >/dev/null
+    return 1
+  fi
+
+  echo "Imported ${entry_addr}."
   popd >/dev/null
 }
 
@@ -1995,12 +2009,16 @@ delete_failed_eks_node_groups() {
   esac
 }
 
-# Drop stale launch template state (launch template removed from module).
+# Drop stale state addresses from older module versions. In API mode, keep the
+# EC2_LINUX access entry — cleanup must not remove it after import.
 cleanup_stale_eks_auth_state() {
   local dev_abs="${1:-environments/dev}"
   local did_pushd=false
+  local cluster_name auth_mode
 
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+  cluster_name="$(eks_cluster_name)"
 
   if [ "$(pwd)" != "${dev_abs}" ]; then
     pushd "${dev_abs}" >/dev/null
@@ -2010,7 +2028,23 @@ cleanup_stale_eks_auth_state() {
   terraform state rm "$(dev_eks_state_prefix).aws_launch_template.node_group[\"general\"]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).kubernetes_config_map_v1.aws_auth[0]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" 2>/dev/null || true
-  terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
+
+  if eks_cluster_exists_in_aws "${cluster_name}"; then
+    auth_mode="$(aws eks describe-cluster \
+      --name "${cluster_name}" \
+      --region "${AWS_REGION}" \
+      --query 'cluster.accessConfig.authenticationMode' \
+      --output text 2>/dev/null || echo "unknown")"
+    case "${auth_mode}" in
+      API_AND_CONFIG_MAP | CONFIG_MAP)
+        echo "Auth mode ${auth_mode}: removing stale node access entry from state (managed nodes use aws-auth)."
+        terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
+        ;;
+      API)
+        echo "Auth mode API: keeping node access entry in state (required for EC2_LINUX nodes)."
+        ;;
+    esac
+  fi
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
@@ -2648,8 +2682,8 @@ dev_stack_prepare() {
   recover_eks_cluster_before_apply "${dev_abs}"
   upgrade_eks_authentication_mode_if_needed
   migrate_dev_cluster_to_api_node_auth
-  import_eks_node_access_to_state "${dev_abs}"
   cleanup_stale_eks_auth_state "${dev_abs}"
+  import_eks_node_access_to_state "${dev_abs}"
   apply_eks_public_endpoint_if_needed "${dev_abs}"
   reset_stale_eks_managed_nodegroup
   apply_aws_auth_node_role_target "${dev_abs}"
