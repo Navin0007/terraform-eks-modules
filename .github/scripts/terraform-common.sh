@@ -157,19 +157,32 @@ eks_cluster_name() {
   printf '%s\n' "${TF_PROJECT_NAME}-${TF_ENVIRONMENT}-eks"
 }
 
+# environments/dev uses count on module "eks" (addresses are module.eks[0].*).
+dev_eks_state_prefix() {
+  printf '%s' 'module.eks[0]'
+}
+
+dev_addons_state_prefix() {
+  printf '%s' 'module.addons[0]'
+}
+
+dev_eks_cluster_state_addr() {
+  printf '%s\n' "$(dev_eks_state_prefix).aws_eks_cluster.main"
+}
+
 eks_cluster_exists_in_aws() {
   local cluster_name="$1"
   aws eks describe-cluster --name "${cluster_name}" --region "${AWS_REGION}" &>/dev/null
 }
 
 eks_cluster_in_state() {
-  local cluster_addr="${1:-module.eks.aws_eks_cluster.main}"
+  local cluster_addr="${1:-$(dev_eks_cluster_state_addr)}"
   terraform state show -no-color "${cluster_addr}" &>/dev/null
 }
 
 # True when terraform plan wants to create or replace the EKS cluster (replace triggers CreateCluster → 409).
 eks_cluster_plan_wants_recreate() {
-  local cluster_addr="${1:-module.eks.aws_eks_cluster.main}"
+  local cluster_addr="${1:-$(dev_eks_cluster_state_addr)}"
   local plan_log
   plan_log="$(mktemp)"
 
@@ -197,7 +210,7 @@ recover_eks_cluster_before_apply() {
   tf_export_dev_vars
   tf_init_s3_backend "${dev_abs}" dev/terraform.tfstate
   cluster_name="$(eks_cluster_name)"
-  cluster_addr="module.eks.aws_eks_cluster.main"
+  cluster_addr="$(dev_eks_cluster_state_addr)"
 
   if [ "$(pwd)" != "${dev_abs}" ]; then
     pushd "${dev_abs}" >/dev/null
@@ -271,10 +284,10 @@ dev_import_diagnostics() {
     pushd "${dev_abs}" >/dev/null
     did_pushd=true
   fi
-  if terraform state show -no-color module.eks.aws_eks_cluster.main &>/dev/null; then
-    echo "Terraform state: module.eks.aws_eks_cluster.main is present"
+  if terraform state show -no-color "$(dev_eks_cluster_state_addr)" &>/dev/null; then
+    echo "Terraform state: $(dev_eks_cluster_state_addr) is present"
   else
-    echo "Terraform state: module.eks.aws_eks_cluster.main is MISSING"
+    echo "Terraform state: $(dev_eks_cluster_state_addr) is MISSING"
   fi
   echo "EKS-related state addresses:"
   terraform state list -no-color 2>/dev/null | grep -E 'module\.eks|eks_cluster' || echo "(none)"
@@ -1653,7 +1666,7 @@ ensure_eks_cluster_imported() {
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
   cluster_name="$(eks_cluster_name)"
-  cluster_addr="module.eks.aws_eks_cluster.main"
+  cluster_addr="$(dev_eks_cluster_state_addr)"
 
   if [ ! -d "${dev_abs}" ]; then
     echo "::error::Dev directory not found: ${dev_abs}"
@@ -1684,8 +1697,10 @@ ensure_eks_cluster_imported() {
   fi
 
   echo "Importing existing EKS cluster ${cluster_name} into Terraform state..."
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t dev_args < <(tf_dev_extra_var_args)
   set +e
-  import_out="$(terraform import -input=false "${cluster_addr}" "${cluster_name}" 2>&1)"
+  import_out="$(terraform import -input=false "${var_args[@]}" "${dev_args[@]}" "${cluster_addr}" "${cluster_name}" 2>&1)"
   import_status=$?
   set -e
   echo "${import_out}"
@@ -1717,7 +1732,7 @@ verify_eks_cluster_state() {
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
   cluster_name="$(eks_cluster_name)"
-  cluster_addr="module.eks.aws_eks_cluster.main"
+  cluster_addr="$(dev_eks_cluster_state_addr)"
 
   if [ "$(pwd)" != "${dev_abs}" ]; then
     pushd "${dev_abs}" >/dev/null
@@ -1823,10 +1838,10 @@ import_eks_node_access_to_state() {
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
     --region "${AWS_REGION}" &>/dev/null; then
-    if ! terraform state show -no-color 'module.eks.aws_eks_access_entry.node[0]' &>/dev/null; then
+    if ! terraform state show -no-color "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" &>/dev/null; then
       echo "Importing node access entry into Terraform state..."
       terraform import -input=false "${var_args[@]}" "${dev_args[@]}" \
-        'module.eks.aws_eks_access_entry.node[0]' "${cluster_name}:${node_role_arn}" || true
+        "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" "${cluster_name}:${node_role_arn}" || true
     fi
   fi
 
@@ -1836,10 +1851,10 @@ import_eks_node_access_to_state() {
     --region "${AWS_REGION}" \
     --query "associatedAccessPolicies[?policyArn=='${policy_arn}'].policyArn | [0]" \
     --output text 2>/dev/null | grep -q "${policy_arn}"; then
-    if ! terraform state show -no-color 'module.eks.aws_eks_access_policy_association.node[0]' &>/dev/null; then
+    if ! terraform state show -no-color "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" &>/dev/null; then
       echo "Importing node access policy association into Terraform state..."
       terraform import -input=false "${var_args[@]}" "${dev_args[@]}" \
-        'module.eks.aws_eks_access_policy_association.node[0]' \
+        "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" \
         "${cluster_name}#${node_role_arn}#${policy_arn}" || true
     fi
   fi
@@ -1939,7 +1954,7 @@ reset_stale_eks_managed_nodegroup() {
       local dev_abs
       dev_abs="$(resolve_dev_dir environments/dev)"
       pushd "${dev_abs}" >/dev/null
-      terraform state rm 'module.eks.aws_eks_node_group.main["general"]' 2>/dev/null || true
+      terraform state rm "$(dev_eks_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
       popd >/dev/null
     fi
   fi
@@ -1981,7 +1996,7 @@ delete_failed_eks_node_groups() {
         --region "${AWS_REGION}"
       if [ -d "${dev_abs}/.terraform" ]; then
         pushd "${dev_abs}" >/dev/null
-        terraform state rm 'module.eks.aws_eks_node_group.main["general"]' 2>/dev/null || true
+        terraform state rm "$(dev_eks_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
         popd >/dev/null
       fi
       ;;
@@ -2007,9 +2022,9 @@ cleanup_stale_eks_auth_state() {
     did_pushd=true
   fi
 
-  terraform state rm 'module.eks.aws_launch_template.node_group["general"]' 2>/dev/null || true
-  terraform state rm 'module.eks.kubernetes_config_map_v1.aws_auth[0]' 2>/dev/null || true
-  terraform state rm 'module.eks.aws_eks_access_entry.node[0]' 2>/dev/null || true
+  terraform state rm "$(dev_eks_state_prefix).aws_launch_template.node_group[\"general\"]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_state_prefix).kubernetes_config_map_v1.aws_auth[0]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
@@ -2049,7 +2064,7 @@ apply_eks_public_endpoint_if_needed() {
   echo "Enabling public EKS API endpoint (targeted) so CI can apply aws-auth..."
   terraform apply -input=false -auto-approve -no-color \
     "${var_args[@]}" "${dev_args[@]}" \
-    -target='module.eks.aws_eks_cluster.main'
+    -target="$(dev_eks_cluster_state_addr)"
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
@@ -2136,7 +2151,7 @@ apply_aws_auth_node_role_target() {
   echo "Recording aws-auth merge in Terraform state (targeted)..."
   terraform apply -input=false -auto-approve -no-color \
     "${var_args[@]}" "${dev_args[@]}" \
-    -target='module.eks.null_resource.aws_auth_node_role[0]'
+    -target="$(dev_eks_state_prefix).null_resource.aws_auth_node_role[0]"
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
@@ -2671,8 +2686,10 @@ import_existing_dev_resources() {
     return 0
   fi
 
-  local cluster_name
+  local cluster_name eks_prefix addons_prefix
   cluster_name="$(eks_cluster_name)"
+  eks_prefix="$(dev_eks_state_prefix)"
+  addons_prefix="$(dev_addons_state_prefix)"
   local node_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node"
   local log_group_name="/aws/eks/${cluster_name}/cluster"
   local nodegroup_name="general"
@@ -2709,7 +2726,7 @@ import_existing_dev_resources() {
 
   if aws logs describe-log-groups --log-group-name-prefix "${log_group_name}" \
     --query "logGroups[?logGroupName=='${log_group_name}'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
-    import_if_missing module.eks.aws_cloudwatch_log_group.cluster "${log_group_name}" true
+    import_if_missing "${eks_prefix}.aws_cloudwatch_log_group.cluster" "${log_group_name}" true
   fi
 
   local oidc_issuer oidc_provider_arn
@@ -2717,17 +2734,17 @@ import_existing_dev_resources() {
   if [ -n "${oidc_issuer}" ] && [ "${oidc_issuer}" != "None" ]; then
     oidc_provider_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${oidc_issuer#https://}"
     if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${oidc_provider_arn}" &>/dev/null; then
-      import_if_missing module.eks.aws_iam_openid_connect_provider.cluster "${oidc_provider_arn}" true
+      import_if_missing "${eks_prefix}.aws_iam_openid_connect_provider.cluster" "${oidc_provider_arn}" true
     fi
   fi
 
-  import_if_missing "module.eks.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
+  import_if_missing "${eks_prefix}.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
 
   if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
     --region "${AWS_REGION}" &>/dev/null; then
-    import_if_missing "module.eks.aws_eks_access_entry.node[0]" "${cluster_name}:${node_role_arn}" true
+    import_if_missing "${eks_prefix}.aws_eks_access_entry.node[0]" "${cluster_name}:${node_role_arn}" true
   fi
 
   local nodegroup_policy_arn="arn:aws:eks::aws:cluster-access-policy/AmazonEKSNodegroupPolicy"
@@ -2738,7 +2755,7 @@ import_existing_dev_resources() {
     --query "associatedAccessPolicies[?policyArn=='${nodegroup_policy_arn}'].policyArn | [0]" \
     --output text 2>/dev/null | grep -q "${nodegroup_policy_arn}"; then
     import_if_missing \
-      "module.eks.aws_eks_access_policy_association.node[0]" \
+      "${eks_prefix}.aws_eks_access_policy_association.node[0]" \
       "${cluster_name}#${node_role_arn}#${nodegroup_policy_arn}" \
       true
   fi
@@ -2746,9 +2763,9 @@ import_existing_dev_resources() {
   local addon_name addon_addr
   for addon_name in kube-proxy coredns aws-ebs-csi-driver; do
     case "${addon_name}" in
-      kube-proxy) addon_addr="module.addons.aws_eks_addon.kube_proxy" ;;
-      coredns) addon_addr="module.addons.aws_eks_addon.coredns" ;;
-      aws-ebs-csi-driver) addon_addr="module.addons.aws_eks_addon.aws_ebs_csi_driver" ;;
+      kube-proxy) addon_addr="${addons_prefix}.aws_eks_addon.kube_proxy" ;;
+      coredns) addon_addr="${addons_prefix}.aws_eks_addon.coredns" ;;
+      aws-ebs-csi-driver) addon_addr="${addons_prefix}.aws_eks_addon.aws_ebs_csi_driver" ;;
     esac
     if aws eks describe-addon \
       --cluster-name "${cluster_name}" \
@@ -2763,7 +2780,7 @@ import_existing_dev_resources() {
     --nodegroup-name "${nodegroup_name}" \
     --region "${AWS_REGION}" &>/dev/null; then
     import_if_missing \
-      "module.eks.aws_eks_node_group.main[\"${nodegroup_name}\"]" \
+      "${eks_prefix}.aws_eks_node_group.main[\"${nodegroup_name}\"]" \
       "${cluster_name}:${nodegroup_name}" \
       true
   fi
@@ -2791,7 +2808,7 @@ dev_stack_state_category() {
     module.vpc.*)
       printf '%s' vpc
       ;;
-    module.iam_irsa.* | module.iam.aws_iam_role.irsa* | module.iam.aws_iam_role_policy_attachment.irsa*)
+    module.iam_irsa.* | module.iam_irsa\[0\].* | module.iam.aws_iam_role.irsa* | module.iam.aws_iam_role_policy_attachment.irsa*)
       printf '%s' irsa
       ;;
     module.iam.*)
@@ -2800,10 +2817,10 @@ dev_stack_state_category() {
     module.sg.*)
       printf '%s' security_groups
       ;;
-    module.eks.*)
+    module.eks.* | module.eks\[0\].*)
       printf '%s' eks
       ;;
-    module.addons.*)
+    module.addons.* | module.addons\[0\].*)
       printf '%s' addons
       ;;
     *)
