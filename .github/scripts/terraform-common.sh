@@ -2697,3 +2697,108 @@ import_existing_dev_resources() {
 
   popd >/dev/null
 }
+
+# Map a Terraform state address to a summary category.
+dev_stack_state_category() {
+  local addr="${1:?}"
+
+  case "${addr}" in
+    module.vpc.module.vpc_endpoints.* \
+      | module.vpc.aws_security_group.vpc_endpoints \
+      | module.vpc.aws_vpc_security_group.vpc_endpoints*)
+      printf '%s' vpc_endpoints
+      ;;
+    module.vpc.*)
+      printf '%s' vpc
+      ;;
+    module.iam_irsa.* | module.iam.aws_iam_role.irsa* | module.iam.aws_iam_role_policy_attachment.irsa*)
+      printf '%s' irsa
+      ;;
+    module.iam.*)
+      printf '%s' iam
+      ;;
+    module.sg.*)
+      printf '%s' security_groups
+      ;;
+    module.eks.*)
+      printf '%s' eks
+      ;;
+    module.addons.*)
+      printf '%s' addons
+      ;;
+    *)
+      printf '%s' other
+      ;;
+  esac
+}
+
+# Print categorized resource counts and key outputs after dev apply.
+dev_stack_apply_summary() {
+  local dev_abs="${1:-environments/dev}"
+  local did_pushd=false
+  local addr category label
+  local -a categories=(vpc vpc_endpoints iam security_groups eks irsa addons other)
+  local -A category_labels=(
+    [vpc]="VPC and networking"
+    [vpc_endpoints]="VPC endpoints"
+    [iam]="IAM roles and attachments"
+    [security_groups]="EKS security groups and rules"
+    [eks]="EKS cluster and node groups"
+    [irsa]="IRSA roles"
+    [addons]="EKS add-ons"
+    [other]="Other"
+  )
+  local -A category_counts=()
+  local -A category_items=()
+  local total=0
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  echo "=== Dev stack apply summary ==="
+  echo ""
+
+  if ! terraform state list -no-color &>/dev/null; then
+    echo "(no Terraform state — apply may not have completed)"
+    [ "${did_pushd}" = true ] && popd >/dev/null
+    return 0
+  fi
+
+  while IFS= read -r addr; do
+    [ -z "${addr}" ] && continue
+    category="$(dev_stack_state_category "${addr}")"
+    category_counts["${category}"]=$(( ${category_counts["${category}"]:-0} + 1 ))
+    category_items["${category}"]+="${addr}"$'\n'
+    total=$((total + 1))
+  done < <(terraform state list -no-color 2>/dev/null)
+
+  echo "Total managed resources: ${total}"
+  echo ""
+
+  for category in "${categories[@]}"; do
+    [ "${category_counts[${category}]:-0}" -eq 0 ] && continue
+    label="${category_labels[${category}]}"
+    echo "${label}: ${category_counts[${category}]}"
+    while IFS= read -r addr; do
+      [ -z "${addr}" ] && continue
+      echo "  - ${addr}"
+    done <<< "${category_items[${category}]}"
+    echo ""
+  done
+
+  echo "--- Key outputs ---"
+  for output in enable_eks vpc_id public_subnet_ids private_subnet_ids \
+    cluster_role_arn node_role_arn control_plane_sg_id node_sg_id \
+    kms_key_arn cluster_name cluster_endpoint oidc_provider_arn \
+    node_group_ids irsa_role_arns addon_arns; do
+    if terraform output -no-color "${output}" &>/dev/null; then
+      echo "${output} = $(terraform output -no-color "${output}" 2>/dev/null)"
+    fi
+  done
+
+  [ "${did_pushd}" = true ] && popd >/dev/null
+}

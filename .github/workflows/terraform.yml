@@ -322,6 +322,7 @@ jobs:
             diagnose_node_join_failure
             exit 1
           fi
+          dev_stack_apply_summary environments/dev
           popd >/dev/null
 
       - name: Policies destroy
