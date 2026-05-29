@@ -61,20 +61,26 @@ flowchart LR
 2. **vpc** — VPC, subnets, single NAT gateway (`single_nat_gateway = true` for dev cost)  
 3. **iam** (first pass) — cluster and node IAM roles only (no OIDC / IRSA)  
 4. **sg** — control plane, node, and related security groups  
-5. **eks** — cluster and node groups (when `enable_eks = true`)  
+5. **eks** — control plane (and optionally node groups)  
 6. **iam_irsa** (second pass) — IRSA roles for `vpc-cni` and `ebs-csi`  
-7. **addons** — CoreDNS, VPC CNI, kube-proxy, EBS CSI driver  
+7. **addons** — kube-proxy, CoreDNS, EBS CSI driver  
 
-### Phased apply (`enable_eks`)
+### Phased apply (foundation + four EKS passes)
 
-Set `enable_eks = false` (default) to provision **foundation only** (steps 2–4). Later set `enable_eks = true` and apply again to add EKS, IRSA, and add-ons.
+**Foundation** (default): all `enable_eks_*` flags `false` and `enable_eks = false` → VPC, IAM roles, security groups only.
 
-| `enable_eks` | Provisioned |
-|--------------|-------------|
-| `false` | VPC, subnets, NAT, S3 gateway endpoint, EKS cluster/node **IAM roles**, control plane/node/bastion/pod **security groups** |
-| `true` | Above plus EKS cluster, node groups, OIDC, IRSA, managed add-ons |
+Then enable EKS in **four cumulative passes** (each pass keeps prior flags `true`):
 
-**GitHub Actions:** Run workflow with **target** `environments/dev` (or `all`) and **dev_enable_eks** `false`, then re-run with **dev_enable_eks** `true` when ready for the cluster.
+| Pass | Variables | Creates |
+|------|-----------|---------|
+| **1 — cluster** | `enable_eks_cluster = true` | EKS cluster, OIDC, CloudWatch logs, vpc-cni add-on |
+| **2 — nodes** | + `enable_eks_nodes = true` | Managed node group, access entry, aws-auth wiring |
+| **3 — IRSA** | + `enable_irsa = true` | IRSA roles for vpc-cni and ebs-csi |
+| **4 — add-ons** | + `enable_addons = true` | kube-proxy, CoreDNS, EBS CSI driver |
+
+Shortcut: `enable_eks = true` enables all four phases in one apply.
+
+**GitHub Actions:** **target** `environments/dev` (or `all`), set **dev_eks_phase** to `none` → `cluster` → `nodes` → `irsa` → `addons` (or `all` once). Each choice turns on the cumulative flags automatically.
 
 From this directory:
 

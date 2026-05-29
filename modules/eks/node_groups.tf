@@ -1,5 +1,5 @@
 resource "aws_eks_node_group" "main" {
-  for_each = var.node_groups
+  for_each = var.enable_node_groups ? var.node_groups : {}
 
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = each.key
@@ -54,7 +54,7 @@ resource "aws_eks_node_group" "main" {
 }
 
 resource "null_resource" "node_group_scale_out" {
-  for_each = var.manage_aws_auth_configmap ? var.node_groups : {}
+  for_each = var.manage_aws_auth_configmap && var.enable_node_groups ? var.node_groups : {}
 
   triggers = {
     node_group_id = aws_eks_node_group.main[each.key].id

@@ -69,7 +69,7 @@ module "sg" {
 }
 
 module "eks" {
-  count  = var.enable_eks ? 1 : 0
+  count  = local.eks_cluster_enabled ? 1 : 0
   source = "../../modules/eks"
 
   project_name    = var.project_name
@@ -89,10 +89,11 @@ module "eks" {
 
   kms_key_arn = var.state_kms_key_arn
 
-  node_groups = var.node_groups
+  enable_node_groups = local.eks_nodes_enabled
+  node_groups        = local.eks_nodes_enabled ? var.node_groups : {}
 
   # Dev uses API-only node auth (EC2_LINUX access entry); migrated in CI before apply.
-  create_node_access_entry = true
+  create_node_access_entry = local.eks_nodes_enabled
 
   endpoint_private_access = true
   # Public endpoint required so CI/Terraform can apply the aws-auth ConfigMap (nodes still use the private endpoint).
@@ -108,7 +109,7 @@ module "eks" {
 }
 
 module "iam_irsa" {
-  count  = var.enable_eks ? 1 : 0
+  count  = local.irsa_enabled && local.eks_cluster_enabled ? 1 : 0
   source = "../../modules/iam"
 
   project_name   = var.project_name
@@ -134,7 +135,7 @@ module "iam_irsa" {
 }
 
 module "addons" {
-  count  = var.enable_eks ? 1 : 0
+  count  = local.addons_enabled && local.eks_cluster_enabled && local.eks_nodes_enabled && local.irsa_enabled ? 1 : 0
   source = "../../modules/addons"
 
   project_name     = var.project_name

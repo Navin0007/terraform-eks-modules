@@ -21,7 +21,31 @@ variable "aws_account_id" {
 }
 
 variable "enable_eks" {
-  description = "When false, provision VPC, IAM roles, and security groups only (no cluster, IRSA, or add-ons). Set true for a later apply to add EKS."
+  description = "When true, enables all EKS phases (cluster, nodes, IRSA, add-ons). Prefer phased flags for step-by-step applies."
+  type        = bool
+  default     = false
+}
+
+variable "enable_eks_cluster" {
+  description = "Phase 1 — EKS control plane, OIDC provider, CloudWatch logs, and vpc-cni add-on."
+  type        = bool
+  default     = false
+}
+
+variable "enable_eks_nodes" {
+  description = "Phase 2 — managed node groups and node authentication (requires enable_eks_cluster)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_irsa" {
+  description = "Phase 3 — IRSA roles for vpc-cni and ebs-csi (requires cluster/OIDC from phase 1)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_addons" {
+  description = "Phase 4 — kube-proxy, CoreDNS, and EBS CSI add-ons (requires nodes and IRSA)."
   type        = bool
   default     = false
 }

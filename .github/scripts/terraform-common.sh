@@ -55,18 +55,86 @@ tf_dev_extra_var_args() {
   tf_export_dev_vars
   printf '%s\n' \
     "-var=enable_eks=${TF_VAR_enable_eks:-false}" \
+    "-var=enable_eks_cluster=${TF_VAR_enable_eks_cluster:-false}" \
+    "-var=enable_eks_nodes=${TF_VAR_enable_eks_nodes:-false}" \
+    "-var=enable_irsa=${TF_VAR_enable_irsa:-false}" \
+    "-var=enable_addons=${TF_VAR_enable_addons:-false}" \
     "-var=state_kms_key_arn=${TF_VAR_state_kms_key_arn}" \
     "-var=state_bucket_name=${TF_VAR_state_bucket_name}" \
     "-var=state_kms_key_id=${TF_VAR_state_kms_key_id}" \
     "-var=dynamodb_table_name=${TF_VAR_dynamodb_table_name}"
 }
 
-# Matches environments/dev variable enable_eks (CI: workflow input dev_enable_eks).
-dev_stack_enable_eks() {
-  case "${TF_VAR_enable_eks:-false}" in
+_tf_bool_is_true() {
+  case "${1:-false}" in
     true | True | TRUE | 1 | yes | Yes) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Map workflow dev_eks_phase to TF_VAR_enable_* (cumulative phases).
+apply_dev_eks_phase_from_input() {
+  local phase="${1:-none}"
+
+  export TF_VAR_enable_eks=false
+  export TF_VAR_enable_eks_cluster=false
+  export TF_VAR_enable_eks_nodes=false
+  export TF_VAR_enable_irsa=false
+  export TF_VAR_enable_addons=false
+
+  case "${phase}" in
+    all)
+      export TF_VAR_enable_eks=true
+      ;;
+    cluster)
+      export TF_VAR_enable_eks_cluster=true
+      ;;
+    nodes)
+      export TF_VAR_enable_eks_cluster=true
+      export TF_VAR_enable_eks_nodes=true
+      ;;
+    irsa)
+      export TF_VAR_enable_eks_cluster=true
+      export TF_VAR_enable_eks_nodes=true
+      export TF_VAR_enable_irsa=true
+      ;;
+    addons)
+      export TF_VAR_enable_eks_cluster=true
+      export TF_VAR_enable_eks_nodes=true
+      export TF_VAR_enable_irsa=true
+      export TF_VAR_enable_addons=true
+      ;;
+    none | foundation | "")
+      ;;
+    *)
+      echo "::error::Unknown dev_eks_phase: ${phase} (use none, cluster, nodes, irsa, addons, or all)" >&2
+      return 1
+      ;;
+  esac
+
+  echo "Dev EKS phase: ${phase} → cluster=${TF_VAR_enable_eks_cluster} nodes=${TF_VAR_enable_eks_nodes} irsa=${TF_VAR_enable_irsa} addons=${TF_VAR_enable_addons} (enable_eks=${TF_VAR_enable_eks})"
+}
+
+dev_stack_enable_eks_cluster() {
+  _tf_bool_is_true "${TF_VAR_enable_eks:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_eks_cluster:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_eks_nodes:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_irsa:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_addons:-false}" && return 0
+  return 1
+}
+
+dev_stack_enable_eks_nodes() {
+  _tf_bool_is_true "${TF_VAR_enable_eks:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_eks_nodes:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_irsa:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_addons:-false}" && return 0
+  return 1
+}
+
+# Any EKS phase beyond foundation (VPC/IAM/SG).
+dev_stack_enable_eks() {
+  dev_stack_enable_eks_cluster
 }
 
 # Export dev root-module variables for terraform import/plan/apply (more reliable than -var alone).
@@ -2571,8 +2639,13 @@ dev_stack_prepare() {
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_init_s3_backend "${dev_abs}" dev/terraform.tfstate
 
-  if ! dev_stack_enable_eks; then
-    echo "enable_eks=false; provisioning VPC, IAM roles, and security groups only."
+  if ! dev_stack_enable_eks_cluster; then
+    echo "EKS phases off; provisioning VPC, IAM roles, and security groups only."
+    return 0
+  fi
+
+  if ! dev_stack_enable_eks_nodes; then
+    echo "EKS phase: cluster only (control plane, OIDC, vpc-cni; no node groups yet)."
     return 0
   fi
 
@@ -2593,8 +2666,8 @@ import_existing_dev_resources() {
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
 
-  if ! dev_stack_enable_eks; then
-    echo "enable_eks=false; skipping EKS resource imports."
+  if ! dev_stack_enable_eks_nodes; then
+    echo "EKS nodes phase off; skipping node group and add-on imports."
     return 0
   fi
 
@@ -2800,7 +2873,8 @@ dev_stack_apply_summary() {
   done
 
   echo "--- Key outputs ---"
-  for output in enable_eks vpc_id public_subnet_ids private_subnet_ids \
+  for output in enable_eks enable_eks_cluster enable_eks_nodes enable_irsa enable_addons \
+    vpc_id public_subnet_ids private_subnet_ids \
     cluster_role_arn node_role_arn control_plane_sg_id node_sg_id \
     kms_key_arn cluster_name cluster_endpoint oidc_provider_arn \
     node_group_ids irsa_role_arns addon_arns; do

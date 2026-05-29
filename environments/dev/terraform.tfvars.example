@@ -3,8 +3,17 @@ environment    = "dev"
 region         = "us-east-1"
 aws_account_id = "000000000000" # Replace with your 12-digit AWS account ID
 
-# false = VPC + IAM + security groups first; set true later to add EKS, IRSA, and add-ons
-enable_eks      = false
+# Foundation only (default). Use phased flags or enable_eks=true for EKS.
+enable_eks         = false
+enable_eks_cluster = false
+enable_eks_nodes   = false
+enable_irsa        = false
+enable_addons      = false
+# Pass 1: enable_eks_cluster = true
+# Pass 2: also enable_eks_nodes = true
+# Pass 3: also enable_irsa = true
+# Pass 4: also enable_addons = true
+# Or: enable_eks = true  (all phases at once)
 cluster_version = "1.29"
 
 vpc_cidr             = "10.0.0.0/16"

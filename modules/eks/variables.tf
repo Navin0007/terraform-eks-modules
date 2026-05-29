@@ -120,7 +120,7 @@ variable "manage_aws_auth_configmap" {
   default     = true
 
   validation {
-    condition     = length(var.node_groups) == 0 || var.manage_aws_auth_configmap
+    condition     = !var.enable_node_groups || length(var.node_groups) == 0 || var.manage_aws_auth_configmap
     error_message = "manage_aws_auth_configmap must be true when node_groups are configured."
   }
 }
@@ -129,6 +129,12 @@ variable "create_node_access_entry" {
   description = "Create an EC2_LINUX access entry for the node IAM role (required when authentication_mode is API)."
   type        = bool
   default     = false
+}
+
+variable "enable_node_groups" {
+  description = "Create managed node groups and node auth resources. When false, only the control plane and vpc-cni are provisioned."
+  type        = bool
+  default     = true
 }
 
 variable "node_groups" {

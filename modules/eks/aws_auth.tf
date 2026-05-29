@@ -1,6 +1,6 @@
 # Managed node groups in API_AND_CONFIG_MAP use aws-auth mapRoles (not EC2_LINUX access entries).
 resource "null_resource" "aws_auth_node_role" {
-  count = var.manage_aws_auth_configmap ? 1 : 0
+  count = var.manage_aws_auth_configmap && var.enable_node_groups ? 1 : 0
 
   triggers = {
     cluster_name  = aws_eks_cluster.main.name

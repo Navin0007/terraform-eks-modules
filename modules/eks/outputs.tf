@@ -49,7 +49,7 @@ output "node_group_arns" {
 
 output "nodes_joined" {
   description = "Set after node group scale-out and Ready node verification (gates add-on install)."
-  value       = join(",", [for _, r in null_resource.node_group_scale_out : r.id])
+  value       = var.enable_node_groups ? join(",", [for _, r in null_resource.node_group_scale_out : r.id]) : ""
 }
 
 output "cloudwatch_log_group_name" {
