@@ -46,8 +46,6 @@ resource "aws_eks_node_group" "main" {
     aws_eks_cluster.main,
     aws_eks_addon.vpc_cni,
     null_resource.aws_auth_node_role[0],
-    aws_vpc_security_group_ingress_rule.control_plane_from_cluster_sg_https,
-    aws_vpc_security_group_egress_rule.control_plane_to_cluster_sg_kubelet,
   ]
 }
 

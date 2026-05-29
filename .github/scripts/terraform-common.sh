@@ -2763,6 +2763,17 @@ import_eks_foundation_resources() {
     fi
 
     import_if_missing "${eks_prefix}.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
+
+    # EKS creates control-plane ↔ cluster SG rules at cluster create; drop stale TF addresses.
+    for addr in \
+      "${eks_prefix}.aws_vpc_security_group_ingress_rule.control_plane_from_cluster_sg_https" \
+      "${eks_prefix}.aws_vpc_security_group_egress_rule.control_plane_to_cluster_sg_kubelet" \
+      "${eks_prefix}.aws_vpc_security_group_egress_rule.control_plane_to_cluster_sg_webhooks"; do
+      if terraform_state_has "${addr}"; then
+        echo "Removing deprecated EKS cluster SG rule from state (managed by AWS): ${addr}"
+        terraform state rm -no-color "${addr}" || true
+      fi
+    done
   fi
 
   if [ "${did_pushd}" = true ]; then

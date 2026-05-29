@@ -442,7 +442,8 @@ Line numbers refer to current `main` and may shift as the repo evolves.
 | Auth mode upgrade | `modules/eks/auth_mode.tf` | 2–16 |
 | Auth mode upgrade (CI) | `.github/workflows/terraform.yml` | 261–265 |
 | EC2_LINUX policy removed | `modules/eks/access.tf` | 1–10 |
-| SG rules | `modules/eks/cluster_security_group_rules.tf` | 6–31 |
+| CP ↔ node SG rules | `modules/sg/main.tf` | 71–105 |
+| CP ↔ cluster SG rules | EKS-managed at cluster create (not Terraform) |
 | Node group (no LT, disk) | `modules/eks/node_groups.tf` | 1–51 |
 | **Unauthorized / aws-auth** | `modules/eks/scripts/apply-aws-auth-node-role.sh` | 1–48 |
 | **Unauthorized / aws-auth** | `modules/eks/aws_auth.tf` | 1–24 |
@@ -632,6 +633,25 @@ Deleting an EKS cluster does **not** remove `/aws/eks/<cluster>/cluster`. After 
 
 ---
 
+## Issue 23 — Duplicate VPC security group rules on cluster create
+
+**Symptom**
+
+```
+InvalidPermission.Duplicate: the specified rule "peer: sg-..., TCP, from port: 443..." already exists
+  with module.eks[0].aws_vpc_security_group_ingress_rule.control_plane_from_cluster_sg_https
+```
+
+**Cause**
+
+When an EKS cluster is created with a custom control plane security group, **AWS automatically adds** ingress/egress rules between that SG and the EKS-managed **cluster security group**. Terraform was also managing identical rules in `cluster_security_group_rules.tf`, so the same apply created the cluster (and AWS rules) then failed creating duplicates.
+
+**Fix**
+
+Removed redundant Terraform SG rule resources; EKS-managed rules are sufficient. Stale state addresses are removed in `import_eks_foundation_resources`. Re-run **apply** with `dev_eks_phase: cluster` (cluster already exists — apply should complete remaining resources).
+
+---
+
 | Symptom | First reference |
 |--------|------------------|
 | KMS alias NotFound on bootstrap init | §1a — `bootstrap_remote_backend_ready` |
@@ -645,7 +665,8 @@ Deleting an EKS cluster does **not** remove `/aws/eks/<cluster>/cluster`. After 
 | Cluster 409 / replace | `modules/eks/main.tf` L32–50 |
 | Access entry mode error | `upgrade-eks-authentication-mode.sh` L22–28 |
 | Policy on EC2_LINUX entry | `modules/eks/access.tf` — entry only, no `associate-access-policy` |
-| Join / SG (not Unauthorized) | `cluster_security_group_rules.tf` L6–31 |
+| Join / SG (not Unauthorized) | `modules/sg/main.tf` L71–105; EKS cluster SG rules (Issue 23) |
+| **Duplicate cluster SG rules** | Issue 23 — removed `cluster_security_group_rules.tf` |
 | **Kubelet Unauthorized (API mode)** | Issue 21 — recreate cluster; `recover_dev_cluster_if_api_mode` |
 | **Log group already exists** | Issue 22 — `import_eks_foundation_resources`, log group delete on recreate |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
