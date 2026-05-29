@@ -41,6 +41,10 @@ on:
           - global/bootstrap
           - global/policies
           - environments/dev
+      dev_enable_eks:
+        description: "Dev only — provision EKS cluster, IRSA, and add-ons (false = VPC + IAM + SG only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -56,6 +60,7 @@ env:
   TF_STATE_KMS_KEY_ID: ${{ vars.TF_STATE_KMS_KEY_ID }}
   TF_STATE_DYNAMODB_TABLE: ${{ vars.TF_STATE_DYNAMODB_TABLE }}
   TF_STATE_KMS_KEY_ARN: ${{ vars.TF_STATE_KMS_KEY_ARN }}
+  TF_VAR_enable_eks: ${{ github.event.inputs.dev_enable_eks || 'false' }}
 
 jobs:
   fmt:
@@ -250,20 +255,29 @@ jobs:
           tf_init_s3_backend environments/dev dev/terraform.tfstate
 
       - name: Import existing dev resources
-        if: inputs.operation != 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
+        if: >-
+          inputs.dev_enable_eks == true
+          && inputs.operation != 'destroy'
+          && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
           import_existing_dev_resources environments/dev
 
       # TODO: Remove after my-project-dev-eks is in Terraform state (recovery from partial apply).
       - name: Import EKS cluster into state (recovery)
-        if: inputs.operation != 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
+        if: >-
+          inputs.dev_enable_eks == true
+          && inputs.operation != 'destroy'
+          && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
           import_eks_cluster_recovery environments/dev
 
       - name: Upgrade EKS authentication mode
-        if: inputs.operation != 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
+        if: >-
+          inputs.dev_enable_eks == true
+          && inputs.operation != 'destroy'
+          && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
           upgrade_eks_authentication_mode_if_needed

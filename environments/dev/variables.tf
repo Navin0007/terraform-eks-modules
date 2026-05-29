@@ -20,6 +20,12 @@ variable "aws_account_id" {
   type        = string
 }
 
+variable "enable_eks" {
+  description = "When false, provision VPC, IAM roles, and security groups only (no cluster, IRSA, or add-ons). Set true for a later apply to add EKS."
+  type        = bool
+  default     = false
+}
+
 variable "cluster_version" {
   description = "Kubernetes version for the EKS control plane."
   type        = string

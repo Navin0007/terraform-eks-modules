@@ -54,10 +54,19 @@ tf_var_args() {
 tf_dev_extra_var_args() {
   tf_export_dev_vars
   printf '%s\n' \
+    "-var=enable_eks=${TF_VAR_enable_eks:-false}" \
     "-var=state_kms_key_arn=${TF_VAR_state_kms_key_arn}" \
     "-var=state_bucket_name=${TF_VAR_state_bucket_name}" \
     "-var=state_kms_key_id=${TF_VAR_state_kms_key_id}" \
     "-var=dynamodb_table_name=${TF_VAR_dynamodb_table_name}"
+}
+
+# Matches environments/dev variable enable_eks (CI: workflow input dev_enable_eks).
+dev_stack_enable_eks() {
+  case "${TF_VAR_enable_eks:-false}" in
+    true | True | TRUE | 1 | yes | Yes) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Export dev root-module variables for terraform import/plan/apply (more reliable than -var alone).
@@ -2559,6 +2568,14 @@ bootstrap_finish_teardown() {
 # Prepare dev stack before plan/apply (init + cluster recovery + auth mode).
 dev_stack_prepare() {
   local dev_abs="${1:-environments/dev}"
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_init_s3_backend "${dev_abs}" dev/terraform.tfstate
+
+  if ! dev_stack_enable_eks; then
+    echo "enable_eks=false; provisioning VPC, IAM roles, and security groups only."
+    return 0
+  fi
+
   recover_eks_cluster_before_apply "${dev_abs}"
   upgrade_eks_authentication_mode_if_needed
   migrate_dev_cluster_to_api_node_auth
@@ -2575,6 +2592,11 @@ import_existing_dev_resources() {
   local dev_abs="${1:-environments/dev}"
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
+
+  if ! dev_stack_enable_eks; then
+    echo "enable_eks=false; skipping EKS resource imports."
+    return 0
+  fi
 
   local cluster_name
   cluster_name="$(eks_cluster_name)"

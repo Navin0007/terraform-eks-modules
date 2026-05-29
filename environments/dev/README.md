@@ -61,9 +61,20 @@ flowchart LR
 2. **vpc** — VPC, subnets, single NAT gateway (`single_nat_gateway = true` for dev cost)  
 3. **iam** (first pass) — cluster and node IAM roles only (no OIDC / IRSA)  
 4. **sg** — control plane, node, and related security groups  
-5. **eks** — cluster and node groups (private API endpoint only)  
+5. **eks** — cluster and node groups (when `enable_eks = true`)  
 6. **iam_irsa** (second pass) — IRSA roles for `vpc-cni` and `ebs-csi`  
 7. **addons** — CoreDNS, VPC CNI, kube-proxy, EBS CSI driver  
+
+### Phased apply (`enable_eks`)
+
+Set `enable_eks = false` (default) to provision **foundation only** (steps 2–4). Later set `enable_eks = true` and apply again to add EKS, IRSA, and add-ons.
+
+| `enable_eks` | Provisioned |
+|--------------|-------------|
+| `false` | VPC, subnets, NAT, S3 gateway endpoint, EKS cluster/node **IAM roles**, control plane/node/bastion/pod **security groups** |
+| `true` | Above plus EKS cluster, node groups, OIDC, IRSA, managed add-ons |
+
+**GitHub Actions:** Run workflow with **target** `environments/dev` (or `all`) and **dev_enable_eks** `false`, then re-run with **dev_enable_eks** `true` when ready for the cluster.
 
 From this directory:
 

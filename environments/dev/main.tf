@@ -69,6 +69,7 @@ module "sg" {
 }
 
 module "eks" {
+  count  = var.enable_eks ? 1 : 0
   source = "../../modules/eks"
 
   project_name    = var.project_name
@@ -107,6 +108,7 @@ module "eks" {
 }
 
 module "iam_irsa" {
+  count  = var.enable_eks ? 1 : 0
   source = "../../modules/iam"
 
   project_name   = var.project_name
@@ -122,8 +124,8 @@ module "iam_irsa" {
   ebs_csi_policy_arn           = data.terraform_remote_state.policies.outputs.ebs_csi_policy_arn
 
   create_core_roles       = false
-  oidc_provider_arn       = module.eks.oidc_provider_arn
-  cluster_oidc_issuer_url = module.eks.cluster_oidc_issuer_url
+  oidc_provider_arn       = module.eks[0].oidc_provider_arn
+  cluster_oidc_issuer_url = module.eks[0].cluster_oidc_issuer_url
   irsa_roles              = local.irsa_roles
 
   tags = local.common_tags
@@ -132,18 +134,19 @@ module "iam_irsa" {
 }
 
 module "addons" {
+  count  = var.enable_eks ? 1 : 0
   source = "../../modules/addons"
 
   project_name     = var.project_name
   environment      = var.environment
-  cluster_name     = module.eks.cluster_name
-  cluster_id       = module.eks.cluster_id
-  cluster_version  = module.eks.cluster_version
-  vpc_cni_role_arn = module.iam_irsa.irsa_role_arns["vpc-cni"]
-  ebs_csi_role_arn = module.iam_irsa.irsa_role_arns["ebs-csi"]
+  cluster_name     = module.eks[0].cluster_name
+  cluster_id       = module.eks[0].cluster_id
+  cluster_version  = module.eks[0].cluster_version
+  vpc_cni_role_arn = module.iam_irsa[0].irsa_role_arns["vpc-cni"]
+  ebs_csi_role_arn = module.iam_irsa[0].irsa_role_arns["ebs-csi"]
   # vpc-cni is installed in module.eks before the node group joins.
   install_vpc_cni_addon  = false
-  nodes_ready_dependency = module.eks.nodes_joined
+  nodes_ready_dependency = module.eks[0].nodes_joined
   tags                   = local.common_tags
 
   depends_on = [

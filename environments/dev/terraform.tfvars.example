@@ -3,6 +3,8 @@ environment    = "dev"
 region         = "us-east-1"
 aws_account_id = "000000000000" # Replace with your 12-digit AWS account ID
 
+# false = VPC + IAM + security groups first; set true later to add EKS, IRSA, and add-ons
+enable_eks      = false
 cluster_version = "1.29"
 
 vpc_cidr             = "10.0.0.0/16"
