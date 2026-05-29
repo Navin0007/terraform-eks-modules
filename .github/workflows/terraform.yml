@@ -304,7 +304,9 @@ jobs:
           source .github/scripts/terraform-common.sh
           dev_stack_prepare environments/dev
           pushd environments/dev >/dev/null
-          terraform plan -input=false -no-color
+          mapfile -t var_args < <(tf_var_args)
+          mapfile -t dev_args < <(tf_dev_extra_var_args)
+          terraform plan -input=false -no-color "${var_args[@]}" "${dev_args[@]}"
           popd >/dev/null
 
       - name: Dev apply
@@ -314,7 +316,9 @@ jobs:
           dev_stack_prepare environments/dev
           dev_import_diagnostics environments/dev
           pushd environments/dev >/dev/null
-          if ! terraform apply -input=false -auto-approve -no-color; then
+          mapfile -t var_args < <(tf_var_args)
+          mapfile -t dev_args < <(tf_dev_extra_var_args)
+          if ! terraform apply -input=false -auto-approve -no-color "${var_args[@]}" "${dev_args[@]}"; then
             diagnose_node_join_failure
             exit 1
           fi
