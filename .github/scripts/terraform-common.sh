@@ -2698,6 +2698,11 @@ import_existing_dev_resources() {
   popd >/dev/null
 }
 
+# Managed resources only (excludes data sources; matches terraform apply counts).
+dev_stack_managed_state_list() {
+  terraform state list -no-color 2>/dev/null | grep -vE '^data\.|\.data\.' || true
+}
+
 # Map a Terraform state address to a summary category.
 dev_stack_state_category() {
   local addr="${1:?}"
@@ -2705,7 +2710,9 @@ dev_stack_state_category() {
   case "${addr}" in
     module.vpc.module.vpc_endpoints.* \
       | module.vpc.aws_security_group.vpc_endpoints \
-      | module.vpc.aws_vpc_security_group.vpc_endpoints*)
+      | module.vpc.aws_vpc_security_group.vpc_endpoints* \
+      | module.vpc.aws_vpc_security_group_ingress_rule.vpc_endpoints* \
+      | module.vpc.aws_vpc_security_group_egress_rule.vpc_endpoints*)
       printf '%s' vpc_endpoints
       ;;
     module.vpc.*)
@@ -2762,9 +2769,11 @@ dev_stack_apply_summary() {
   echo "=== Dev stack apply summary ==="
   echo ""
 
-  if ! terraform state list -no-color &>/dev/null; then
+  if ! dev_stack_managed_state_list | grep -q .; then
     echo "(no Terraform state — apply may not have completed)"
-    [ "${did_pushd}" = true ] && popd >/dev/null
+    if [ "${did_pushd}" = true ]; then
+      popd >/dev/null
+    fi
     return 0
   fi
 
@@ -2774,9 +2783,9 @@ dev_stack_apply_summary() {
     category_counts["${category}"]=$(( ${category_counts["${category}"]:-0} + 1 ))
     category_items["${category}"]+="${addr}"$'\n'
     total=$((total + 1))
-  done < <(terraform state list -no-color 2>/dev/null)
+  done < <(dev_stack_managed_state_list)
 
-  echo "Total managed resources: ${total}"
+  echo "Total managed resources: ${total} (data sources excluded)"
   echo ""
 
   for category in "${categories[@]}"; do
@@ -2796,9 +2805,11 @@ dev_stack_apply_summary() {
     kms_key_arn cluster_name cluster_endpoint oidc_provider_arn \
     node_group_ids irsa_role_arns addon_arns; do
     if terraform output -no-color "${output}" &>/dev/null; then
-      echo "${output} = $(terraform output -no-color "${output}" 2>/dev/null)"
+      echo "${output} = $(terraform output -no-color "${output}" 2>/dev/null || true)"
     fi
   done
 
-  [ "${did_pushd}" = true ] && popd >/dev/null
+  if [ "${did_pushd}" = true ]; then
+    popd >/dev/null
+  fi
 }
