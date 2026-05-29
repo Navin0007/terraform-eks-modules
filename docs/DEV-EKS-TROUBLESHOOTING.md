@@ -611,6 +611,27 @@ Re-run **apply** with `dev_eks_phase: all` or run cluster then nodes (first appl
 
 ---
 
+## Issue 22 — CloudWatch log group already exists after cluster recreate
+
+**Symptom**
+
+```
+ResourceAlreadyExistsException: The specified log group already exists
+  with module.eks[0].aws_cloudwatch_log_group.cluster
+```
+
+**Cause**
+
+Deleting an EKS cluster does **not** remove `/aws/eks/<cluster>/cluster`. After `recover_dev_cluster_if_api_mode` clears `module.eks[0]` from state, apply tries to create the log group again. The **cluster** phase did not run foundation imports (only nodes/irsa/addons did).
+
+**Fix**
+
+1. `recover_dev_cluster_if_api_mode` deletes the orphaned log group after cluster delete
+2. `import_eks_foundation_resources` imports log group (and OIDC, vpc-cni) on **cluster** phase
+3. Re-run **apply** with `dev_eks_phase: cluster` (or `all`)
+
+---
+
 | Symptom | First reference |
 |--------|------------------|
 | KMS alias NotFound on bootstrap init | §1a — `bootstrap_remote_backend_ready` |
@@ -626,6 +647,7 @@ Re-run **apply** with `dev_eks_phase: all` or run cluster then nodes (first appl
 | Policy on EC2_LINUX entry | `modules/eks/access.tf` — entry only, no `associate-access-policy` |
 | Join / SG (not Unauthorized) | `cluster_security_group_rules.tf` L6–31 |
 | **Kubelet Unauthorized (API mode)** | Issue 21 — recreate cluster; `recover_dev_cluster_if_api_mode` |
+| **Log group already exists** | Issue 22 — `import_eks_foundation_resources`, log group delete on recreate |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
 | Stale failed node group | `terraform-common.sh` L476–522 |

@@ -275,7 +275,7 @@ jobs:
 
       - name: Import existing dev resources
         if: >-
-          contains(fromJSON('["nodes","irsa","addons","all"]'), inputs.dev_eks_phase)
+          contains(fromJSON('["cluster","nodes","irsa","addons","all"]'), inputs.dev_eks_phase)
           && inputs.operation != 'destroy'
           && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |

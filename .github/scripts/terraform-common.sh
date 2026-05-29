@@ -1827,6 +1827,13 @@ recover_dev_cluster_if_api_mode() {
   aws eks delete-cluster --name "${cluster_name}" --region "${AWS_REGION}"
   aws eks wait cluster-deleted --name "${cluster_name}" --region "${AWS_REGION}"
 
+  local log_group_name="/aws/eks/${cluster_name}/cluster"
+  if aws logs describe-log-groups --log-group-name-prefix "${log_group_name}" \
+    --query "logGroups[?logGroupName=='${log_group_name}'] | length(@)" --output text 2>/dev/null | grep -q '^1$'; then
+    echo "Deleting orphaned CloudWatch log group ${log_group_name}..."
+    aws logs delete-log-group --log-group-name "${log_group_name}" --region "${AWS_REGION}" || true
+  fi
+
   if [ "$(pwd)" != "${dev_abs}" ]; then
     pushd "${dev_abs}" >/dev/null
     did_pushd=true
@@ -2675,6 +2682,7 @@ dev_stack_prepare() {
 
   if ! dev_stack_enable_eks_nodes; then
     echo "EKS phase: cluster only (control plane, OIDC, vpc-cni; no node groups yet)."
+    import_eks_foundation_resources "${dev_abs}"
     return 0
   fi
 
@@ -2688,26 +2696,29 @@ dev_stack_prepare() {
   delete_failed_eks_node_groups "${dev_abs}"
 }
 
-# Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
-import_existing_dev_resources() {
+# Import cluster-level EKS resources (log group, OIDC, vpc-cni) when AWS has them but state was cleared.
+import_eks_foundation_resources() {
   local dev_abs="${1:-environments/dev}"
+  local cluster_name eks_prefix log_group_name
+  local oidc_issuer oidc_provider_arn
+  local did_pushd=false
+
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
 
-  if ! dev_stack_enable_eks_nodes; then
-    echo "EKS nodes phase off; skipping node group and add-on imports."
+  if ! dev_stack_enable_eks_cluster; then
     return 0
   fi
 
-  local cluster_name eks_prefix addons_prefix
   cluster_name="$(eks_cluster_name)"
   eks_prefix="$(dev_eks_state_prefix)"
-  addons_prefix="$(dev_addons_state_prefix)"
-  local node_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node"
-  local log_group_name="/aws/eks/${cluster_name}/cluster"
-  local nodegroup_name="general"
+  log_group_name="/aws/eks/${cluster_name}/cluster"
 
-  pushd "${dev_abs}" >/dev/null
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
   mapfile -t var_args < <(tf_var_args)
   mapfile -t dev_args < <(tf_dev_extra_var_args)
 
@@ -2742,16 +2753,71 @@ import_existing_dev_resources() {
     import_if_missing "${eks_prefix}.aws_cloudwatch_log_group.cluster" "${log_group_name}" true
   fi
 
-  local oidc_issuer oidc_provider_arn
-  oidc_issuer="$(aws eks describe-cluster --name "${cluster_name}" --region "${AWS_REGION}" --query 'cluster.identity.oidc.issuer' --output text)"
-  if [ -n "${oidc_issuer}" ] && [ "${oidc_issuer}" != "None" ]; then
-    oidc_provider_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${oidc_issuer#https://}"
-    if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${oidc_provider_arn}" &>/dev/null; then
-      import_if_missing "${eks_prefix}.aws_iam_openid_connect_provider.cluster" "${oidc_provider_arn}" true
+  if eks_cluster_exists_in_aws "${cluster_name}"; then
+    oidc_issuer="$(aws eks describe-cluster --name "${cluster_name}" --region "${AWS_REGION}" --query 'cluster.identity.oidc.issuer' --output text)"
+    if [ -n "${oidc_issuer}" ] && [ "${oidc_issuer}" != "None" ]; then
+      oidc_provider_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${oidc_issuer#https://}"
+      if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${oidc_provider_arn}" &>/dev/null; then
+        import_if_missing "${eks_prefix}.aws_iam_openid_connect_provider.cluster" "${oidc_provider_arn}" true
+      fi
     fi
+
+    import_if_missing "${eks_prefix}.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
   fi
 
-  import_if_missing "${eks_prefix}.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
+  if [ "${did_pushd}" = true ]; then
+    popd >/dev/null
+  fi
+}
+
+# Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
+import_existing_dev_resources() {
+  local dev_abs="${1:-environments/dev}"
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+
+  import_eks_foundation_resources "${dev_abs}"
+
+  if ! dev_stack_enable_eks_nodes; then
+    echo "EKS nodes phase off; skipping node group and add-on imports."
+    return 0
+  fi
+
+  local cluster_name eks_prefix addons_prefix
+  cluster_name="$(eks_cluster_name)"
+  eks_prefix="$(dev_eks_state_prefix)"
+  addons_prefix="$(dev_addons_state_prefix)"
+  local nodegroup_name="general"
+
+  pushd "${dev_abs}" >/dev/null
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t dev_args < <(tf_dev_extra_var_args)
+
+  terraform_state_has() {
+    terraform state show -no-color "$1" &>/dev/null
+  }
+
+  import_if_missing() {
+    local addr="$1"
+    local id="$2"
+    local optional="${3:-false}"
+
+    if terraform_state_has "${addr}"; then
+      return 0
+    fi
+
+    echo "Importing existing dev resource ${addr}..."
+    if terraform import -input=false "${var_args[@]}" "${dev_args[@]}" "${addr}" "${id}"; then
+      return 0
+    fi
+
+    if [ "${optional}" = "true" ]; then
+      echo "::warning::Could not import ${addr}; Terraform will create or update it on apply."
+      return 0
+    fi
+
+    return 1
+  }
 
   local addon_name addon_addr
   for addon_name in kube-proxy coredns aws-ebs-csi-driver; do
