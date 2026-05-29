@@ -93,7 +93,7 @@ module "eks" {
   node_groups        = local.eks_nodes_enabled ? var.node_groups : {}
 
   # Managed node groups use aws-auth (API_AND_CONFIG_MAP). Do not migrate to API mode.
-  authentication_mode = "API_AND_CONFIG_MAP"
+  authentication_mode      = "API_AND_CONFIG_MAP"
   create_node_access_entry = false
 
   endpoint_private_access = true
