@@ -1,4 +1,4 @@
-# Managed node groups in API_AND_CONFIG_MAP use aws-auth mapRoles (not EC2_LINUX access entries).
+# Managed node groups in API_AND_CONFIG_MAP need aws-auth mapRoles and the EKS EC2_LINUX access entry.
 resource "null_resource" "aws_auth_node_role" {
   count = var.manage_aws_auth_configmap && var.enable_node_groups ? 1 : 0
 

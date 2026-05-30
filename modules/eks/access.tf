@@ -1,4 +1,4 @@
-# Managed node groups in API mode: EKS creates the EC2_LINUX access entry when the
-# node group is created. Do not manage it in Terraform (pre-creating causes Unauthorized).
+# Managed node groups: EKS creates the EC2_LINUX access entry when the node group exists.
+# Do not manage it in Terraform (pre-creating before the node group causes join failures).
 #
-# For API_AND_CONFIG_MAP, use aws-auth via null_resource.aws_auth_node_role instead.
+# API_AND_CONFIG_MAP requires BOTH the EKS access entry and aws-auth mapRoles (see ensure-node-cluster-auth.sh).

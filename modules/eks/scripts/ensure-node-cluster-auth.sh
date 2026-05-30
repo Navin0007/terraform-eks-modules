@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-nodegroup: aws-auth only for API_AND_CONFIG_MAP (no node access entries).
+# Pre-nodegroup: aws-auth + EC2_LINUX access entry for API_AND_CONFIG_MAP managed nodes.
 set -euo pipefail
 
 ensure_node_cluster_auth() {
@@ -23,12 +23,19 @@ ensure_node_cluster_auth() {
       echo "::error::API authentication mode is unsupported for managed node groups (use API_AND_CONFIG_MAP + aws-auth)." >&2
       return 1
       ;;
-    API_AND_CONFIG_MAP | CONFIG_MAP)
+    CONFIG_MAP)
       CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        bash "${script_dir}/delete-node-access-entry.sh"
+        bash "${script_dir}/delete-node-access-entry.sh" || true
       echo "Merging node role into aws-auth mapRoles..."
       CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
         python3 "${script_dir}/merge-aws-auth-maproles.py"
+      ;;
+    API_AND_CONFIG_MAP)
+      echo "Merging node role into aws-auth mapRoles..."
+      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
+        python3 "${script_dir}/merge-aws-auth-maproles.py"
+      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
+        bash "${script_dir}/ensure-node-access-entry.sh"
       ;;
     *)
       echo "::error::Unsupported authentication mode: ${auth_mode}"

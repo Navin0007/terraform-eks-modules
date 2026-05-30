@@ -493,28 +493,27 @@ Line numbers refer to current `main` and may shift as the repo evolves.
 
 ## Issue 17: Perfect aws-auth but still Unauthorized (API_AND_CONFIG_MAP)
 
-**Symptoms (your latest diagnostics)**
+**Symptoms**
 
 - `authMode`: `API_AND_CONFIG_MAP`
-- No access entry for node role
+- No access entry for node role (deleted by CI)
 - `aws-auth` `mapRoles` correct for `my-project-dev-eks-node`
-- Node group ACTIVE, `launchTemplate: null`, IAM profile present, IMDS role correct
-- Kubelet still `Unable to register node with API server: Unauthorized` for 1+ hour
+- Node group ACTIVE, kubelet `Unable to register node with API server: Unauthorized`
 
 **Cause**
 
-In `API_AND_CONFIG_MAP`, the **API authentication path is evaluated before** the `aws-auth` ConfigMap. When no valid access entry exists for the node principal, the API path can return **Unauthorized without falling through to `aws-auth`**, even when `mapRoles` is correct.
+In `API_AND_CONFIG_MAP`, managed nodes need **both** the EKS **EC2_LINUX access entry** and **`aws-auth` mapRoles**. CI was deleting the access entry after the node group was created at scale 0, leaving only aws-auth — which is not sufficient on its own.
 
 **Fix**
 
-| Step | What |
-|------|------|
-| 1 | CI migrates dev cluster `API_AND_CONFIG_MAP` → **API** (`migrate-cluster-auth-to-api.sh`) |
-| 2 | Create **EC2_LINUX** access entry for the node IAM role (not STANDARD) |
-| 3 | **Recycle** existing node instances (`recycle-nodegroup-instances.sh`) so kubelets re-auth |
-| 4 | `create_node_access_entry = true` in `environments/dev/main.tf` |
+| Change | File |
+|--------|------|
+| Keep / ensure EC2_LINUX access entry (do not delete in API_AND_CONFIG_MAP) | `ensure-node-access-entry.sh`, `after-nodegroup-auth.sh` |
+| Merge aws-auth before scale-out | `merge-aws-auth-maproles.py` |
+| Repair stuck join: ensure both + recycle instances | `repair_dev_node_join_if_needed` |
+| Remove delete-access-entry from wait loop | `wait-for-ready-nodes.sh` |
 
-Prepare order: `upgrade_eks_authentication_mode_if_needed` → `migrate_dev_cluster_to_api_node_auth` → apply.
+Re-run **apply** with `dev_eks_phase: nodes`. CI will create the missing access entry, refresh aws-auth, recycle instances, and wait for Ready nodes.
 
 ---
 

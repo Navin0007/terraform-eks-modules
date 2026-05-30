@@ -32,10 +32,10 @@ after_nodegroup_auth() {
     --nodegroup-name "${nodegroup_name}" \
     --region "${region}"
 
+  echo "Ensuring EC2_LINUX access entry and aws-auth before scaling node group..."
   CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-    bash "${script_dir}/delete-node-access-entry.sh"
-
-  echo "Refreshing aws-auth before scaling node group..."
+    NODEGROUP_NAME="${nodegroup_name}" \
+    bash "${script_dir}/ensure-node-access-entry.sh"
   CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
     python3 "${script_dir}/merge-aws-auth-maproles.py"
 

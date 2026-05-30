@@ -2140,7 +2140,25 @@ ensure_node_cluster_auth_for_dev() {
       fi
       echo "Node access entry present (API mode)."
       ;;
-    *)
+    API_AND_CONFIG_MAP)
+      echo "--- aws-auth mapRoles after ensure ---"
+      kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null || true
+      echo ""
+      if ! kubectl get configmap aws-auth -n kube-system -o yaml | grep -Fq "${node_role_arn}"; then
+        echo "::error::Node role ${node_role_arn} not found in aws-auth mapRoles."
+        return 1
+      fi
+      echo "aws-auth mapRoles contains node role."
+      if ! aws eks describe-access-entry \
+        --cluster-name "${cluster_name}" \
+        --principal-arn "${node_role_arn}" \
+        --region "${AWS_REGION}" &>/dev/null; then
+        echo "::error::EC2_LINUX access entry missing for API_AND_CONFIG_MAP (both entry and aws-auth are required)."
+        return 1
+      fi
+      echo "EC2_LINUX access entry present (API_AND_CONFIG_MAP)."
+      ;;
+    CONFIG_MAP | *)
       echo "--- aws-auth mapRoles after ensure ---"
       kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null || true
       echo ""
@@ -2182,6 +2200,90 @@ apply_aws_auth_node_role_target() {
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
 
+# Repair stuck node join when aws-auth is correct but EC2_LINUX access entry was removed.
+repair_dev_node_join_if_needed() {
+  local dev_abs="${1:-environments/dev}"
+  local cluster_name nodegroup_name node_role_arn repo_root
+  local auth_mode ready desired
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+
+  if ! dev_stack_enable_eks_nodes; then
+    return 0
+  fi
+
+  cluster_name="$(eks_cluster_name)"
+  nodegroup_name="general"
+  repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    return 0
+  fi
+
+  if ! aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" &>/dev/null; then
+    return 0
+  fi
+
+  auth_mode="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.accessConfig.authenticationMode' \
+    --output text 2>/dev/null || echo "unknown")"
+
+  if [ "${auth_mode}" != "API_AND_CONFIG_MAP" ]; then
+    return 0
+  fi
+
+  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
+  desired="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.scalingConfig.desiredSize' \
+    --output text 2>/dev/null || echo "0")"
+
+  if [ "${desired}" -le 0 ] 2>/dev/null; then
+    return 0
+  fi
+
+  aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+  ready="$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready" { n++ } END { print n + 0 }')"
+
+  if [ "${ready}" -ge "${desired}" ] && [ "${ready}" -gt 0 ]; then
+    echo "Node join OK: Ready=${ready}/${desired}."
+    return 0
+  fi
+
+  echo "Node join repair: Ready=${ready}/${desired} on ${cluster_name}/${nodegroup_name}."
+
+  python3 -c "import yaml" 2>/dev/null || pip install --user pyyaml
+
+  CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+    bash "${repo_root}/modules/eks/scripts/ensure-node-cluster-auth.sh"
+
+  ready="$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready" { n++ } END { print n + 0 }')"
+  if [ "${ready}" -ge "${desired}" ] && [ "${ready}" -gt 0 ]; then
+    echo "Node join repair succeeded: Ready=${ready}/${desired}."
+    return 0
+  fi
+
+  echo "Recycling node group instances so kubelets pick up access entry + aws-auth..."
+  CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+    NODEGROUP_NAME="${nodegroup_name}" \
+    bash "${repo_root}/modules/eks/scripts/recycle-nodegroup-instances.sh"
+
+  CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+    NODEGROUP_NAME="${nodegroup_name}" DESIRED_SIZE="${desired}" \
+    bash "${repo_root}/modules/eks/scripts/wait-for-ready-nodes.sh" || {
+      echo "::warning::Node join repair did not reach Ready=${desired} before apply; continuing."
+      return 0
+    }
+}
+
 # Print node join hints when a node group is CREATE_FAILED.
 diagnose_node_join_failure() {
   tf_export_dev_vars
@@ -2204,7 +2306,7 @@ diagnose_node_join_failure() {
     --query 'cluster.accessConfig.authenticationMode' \
     --output text 2>/dev/null || echo "unknown")"
 
-  echo "--- access entry for node role (required for API mode; must be absent for API_AND_CONFIG_MAP) ---"
+  echo "--- access entry for node role (API_AND_CONFIG_MAP needs EC2_LINUX entry + aws-auth) ---"
   if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
@@ -2215,7 +2317,7 @@ diagnose_node_join_failure() {
       --region "${AWS_REGION}" \
       --output json 2>/dev/null || true
     if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
-      echo "::error::Node access entry present in API_AND_CONFIG_MAP — API auth is tried first and often causes Unauthorized."
+      echo "EC2_LINUX access entry present (required with aws-auth for API_AND_CONFIG_MAP)."
     fi
     echo "--- associated access policies for node role (EC2_LINUX entries cannot use these) ---"
     aws eks list-associated-access-policies \
@@ -2229,8 +2331,10 @@ diagnose_node_join_failure() {
   else
     if [ "${auth_mode}" = "API" ]; then
       echo "::error::Node access entry missing — API mode requires EC2_LINUX entry for the node role."
+    elif [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
+      echo "::error::EC2_LINUX access entry missing — API_AND_CONFIG_MAP requires both access entry and aws-auth mapRoles."
     else
-      echo "(no access entry for node role — expected for API_AND_CONFIG_MAP + aws-auth)"
+      echo "(no access entry for node role — OK for CONFIG_MAP + aws-auth only)"
     fi
   fi
 
@@ -2692,6 +2796,7 @@ dev_stack_prepare() {
   import_eks_node_access_to_state "${dev_abs}"
   apply_eks_public_endpoint_if_needed "${dev_abs}"
   reset_stale_eks_managed_nodegroup
+  repair_dev_node_join_if_needed "${dev_abs}"
   apply_aws_auth_node_role_target "${dev_abs}"
   delete_failed_eks_node_groups "${dev_abs}"
 }
