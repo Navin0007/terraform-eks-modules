@@ -632,6 +632,93 @@ aws iam simulate-principal-policy \
 
 ---
 
+## Issue 27: Nodes Ready but add-ons Pending — stuck `uninitialized` taint / CCM init incomplete
+
+**Symptoms**
+
+- `kubectl get nodes` shows **Ready**; node group **ACTIVE**
+- CoreDNS and/or **ebs-csi-controller** deployments stay **0/2**; pods **Pending**
+- Scheduler events:
+
+  ```
+  0/2 nodes are available: 2 node(s) had untolerated taint {node.cloudprovider.kubernetes.io/uninitialized: true}
+  ```
+
+- **ebs-csi-node** DaemonSet pods **CrashLoopBackOff** with:
+
+  ```
+  Retrieving IMDS metadata failed ... context deadline exceeded
+  Retrieving Kubernetes metadata failed ... could not retrieve instance type from topology label
+  ```
+
+- Nodes may have `spec.providerID` set but **no** `topology.kubernetes.io/zone` / `node.kubernetes.io/instance-type` labels for a long time
+
+**Cause**
+
+After kubelet registers a node, the **AWS Cloud Controller Manager (CCM)** must finish initialization: set provider labels and remove `node.cloudprovider.kubernetes.io/uninitialized`. Until then, only pods that tolerate that taint can schedule (aws-node, kube-proxy DaemonSets).
+
+Common triggers in this repo:
+
+1. Add-ons installed while nodes were only **Ready** (not fully CCM-initialized). `wait-for-ready-nodes.sh` checks Ready count only — it does **not** wait for taint removal.
+2. Nodes that joined during a prior auth failure may stay half-initialized until CCM catches up or pods are recreated.
+
+EBS CSI node pods crash when **both** IMDS (from container network) and Kubernetes topology labels are unavailable; once labels exist, logs may show `Retrieved metadata from Kubernetes` and pods run fine.
+
+**Diagnose**
+
+```bash
+kubectl get nodes -o custom-columns=\
+NAME:.metadata.name,READY:.status.conditions[-1].type,\
+PROVIDER:.spec.providerID,TAINTS:.spec.taints
+
+kubectl get nodes --show-labels | grep -E 'NAME|topology.kubernetes.io|instance-type'
+
+kubectl get deploy,pods -n kube-system
+kubectl describe pod -n kube-system -l k8s-app=kube-dns | tail -20
+kubectl describe pod -n kube-system -l app=ebs-csi-controller | tail -20
+```
+
+**Healthy node:** `TAINTS=<none>`, labels include `topology.kubernetes.io/zone` and `node.kubernetes.io/instance-type`.
+
+**Fix (existing cluster — no Terraform required)**
+
+1. Wait until taint is gone and labels appear (or confirm with commands above).
+2. Restart add-on workloads so new pods schedule on initialized nodes:
+
+```bash
+kubectl rollout restart deployment -n kube-system coredns ebs-csi-controller
+kubectl get pods -n kube-system -w
+```
+
+3. If taint is **still** present after ~15 minutes, recycle the node group: re-run **apply** with `dev_eks_phase: nodes`.
+
+**Fix (manual unblock — dev only, if CCM is slow)**
+
+If taint/labels are wrong and you need to unblock quickly:
+
+```bash
+kubectl taint nodes --all node.cloudprovider.kubernetes.io/uninitialized:NoSchedule-
+kubectl label node <node-a> topology.kubernetes.io/zone=us-east-1a topology.kubernetes.io/region=us-east-1 node.kubernetes.io/instance-type=t3.medium --overwrite
+kubectl label node <node-b> topology.kubernetes.io/zone=us-east-1b topology.kubernetes.io/region=us-east-1 node.kubernetes.io/instance-type=t3.medium --overwrite
+kubectl rollout restart deployment -n kube-system coredns ebs-csi-controller
+```
+
+(`taint ... not found` / `not labeled` usually means already fixed.)
+
+**Verify**
+
+```bash
+kubectl get deploy -n kube-system   # coredns 2/2, ebs-csi-controller 2/2
+kubectl get ds -n kube-system         # ebs-csi-node 2/2 READY
+kubectl get pods -n kube-system --field-selector=status.phase=Pending   # none
+```
+
+**Prevent (future improvement)**
+
+Gate add-on install on CCM init complete (no `uninitialized` taint + topology labels), not just Ready node count — see `modules/eks/scripts/wait-for-ready-nodes.sh`.
+
+---
+
 ## Issue 18: AssociateAccessPolicy fails on EC2_LINUX access entry
 
 **Symptoms**
@@ -784,6 +871,8 @@ Removed redundant Terraform SG rule resources; EKS-managed rules are sufficient.
 | **Kubelet Unauthorized (API mode)** | Issue 21 — recreate cluster; `recover_dev_cluster_if_api_mode` |
 | **Kubelet Unauthorized (API_AND_CONFIG_MAP + aws-auth OK)** | Issue 24 — recreate as CONFIG_MAP |
 | **CHECK 1–4 PASS, authenticator DescribeInstances 403** | Issue 26 — cluster role needs `ec2:DescribeInstances` |
+| **Nodes Ready, add-ons Pending (`uninitialized` taint)** | Issue 27 — CCM init incomplete; rollout restart or recycle nodes |
+| **EBS CSI node CrashLoop, no topology labels** | Issue 27 — same; wait for labels or restart after CCM init |
 | **Log group already exists** | Issue 22 — `import_eks_foundation_resources`, log group delete on recreate |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
