@@ -496,24 +496,23 @@ Line numbers refer to current `main` and may shift as the repo evolves.
 **Symptoms**
 
 - `authMode`: `API_AND_CONFIG_MAP`
-- No access entry for node role (deleted by CI)
-- `aws-auth` `mapRoles` correct for `my-project-dev-eks-node`
-- Node group ACTIVE, kubelet `Unable to register node with API server: Unauthorized`
+- EC2_LINUX access entry present (often `createdAt` from CI `create-access-entry`)
+- `aws-auth` `mapRoles` correct
+- Kubelet `Unable to register node with API server: Unauthorized`
 
 **Cause**
 
-In `API_AND_CONFIG_MAP`, managed nodes need **both** the EKS **EC2_LINUX access entry** and **`aws-auth` mapRoles**. CI was deleting the access entry after the node group was created at scale 0, leaving only aws-auth — which is not sufficient on its own.
+In `API_AND_CONFIG_MAP`, **access entries are evaluated before aws-auth**. EKS often does **not** create an access entry for managed node groups at scale 0. CI waited, then **manually** ran `create-access-entry`, which produces an entry that **blocks aws-auth fallback** but does **not** wire managed nodes correctly.
 
 **Fix**
 
 | Change | File |
 |--------|------|
-| Keep / ensure EC2_LINUX access entry (do not delete in API_AND_CONFIG_MAP) | `ensure-node-access-entry.sh`, `after-nodegroup-auth.sh` |
-| Merge aws-auth before scale-out | `merge-aws-auth-maproles.py` |
-| Repair stuck join: ensure both + recycle instances | `repair_dev_node_join_if_needed` |
-| Remove delete-access-entry from wait loop | `wait-for-ready-nodes.sh` |
+| Delete CLI access entry; use aws-auth only for managed nodes | `prepare-managed-node-aws-auth.sh` |
+| Never call `create-access-entry` for managed node groups | removed `ensure-node-access-entry.sh` |
+| Repair: delete entry + aws-auth + recycle instances | `repair_dev_node_join_if_needed` |
 
-Re-run **apply** with `dev_eks_phase: nodes`. CI will create the missing access entry, refresh aws-auth, recycle instances, and wait for Ready nodes.
+Re-run **apply** with `dev_eks_phase: nodes`. CI will remove the stale access entry, refresh aws-auth, and recycle instances.
 
 ---
 

@@ -23,7 +23,7 @@ resource "aws_eks_node_group" "main" {
     }
   }
 
-  # Start at scale 0; after-nodegroup-auth.sh removes API access entries then scales out.
+  # Start at scale 0; after-nodegroup-auth.sh prepares aws-auth then scales out.
   scaling_config {
     min_size     = 0
     max_size     = each.value.max_size

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove EKS access entries for the node IAM role (managed nodes use aws-auth only).
+# Remove EKS access entries for the node IAM role (CLI entries block aws-auth for managed nodes).
 set -euo pipefail
 
 delete_node_access_entry() {

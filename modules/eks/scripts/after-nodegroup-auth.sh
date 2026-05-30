@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Node group at scale 0, remove access entries, refresh aws-auth, scale out, verify Ready.
+# Node group at scale 0, prepare aws-auth, scale out, verify Ready.
 set -euo pipefail
 
 after_nodegroup_auth() {
@@ -32,12 +32,9 @@ after_nodegroup_auth() {
     --nodegroup-name "${nodegroup_name}" \
     --region "${region}"
 
-  echo "Ensuring EC2_LINUX access entry and aws-auth before scaling node group..."
+  echo "Preparing aws-auth before scaling node group (remove stale CLI access entries)..."
   CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-    NODEGROUP_NAME="${nodegroup_name}" \
-    bash "${script_dir}/ensure-node-access-entry.sh"
-  CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-    python3 "${script_dir}/merge-aws-auth-maproles.py"
+    bash "${script_dir}/prepare-managed-node-aws-auth.sh"
 
   echo "Scaling node group ${nodegroup_name} to desired=${desired_size}, min=${min_size}, max=${max_size}..."
   aws eks update-nodegroup-config \

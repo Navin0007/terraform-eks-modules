@@ -1,47 +1,17 @@
 #!/usr/bin/env bash
-# Pre-nodegroup: aws-auth + EC2_LINUX access entry for API_AND_CONFIG_MAP managed nodes.
+# Pre-nodegroup: aws-auth for managed nodes (remove stale CLI access entries in API_AND_CONFIG_MAP).
 set -euo pipefail
 
 ensure_node_cluster_auth() {
   local cluster_name="${CLUSTER_NAME:?}"
   local node_role_arn="${NODE_ROLE_ARN:?}"
   local region="${AWS_REGION:?}"
-  local auth_mode script_dir
+  local script_dir
 
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-  auth_mode="$(aws eks describe-cluster \
-    --name "${cluster_name}" \
-    --region "${region}" \
-    --query 'cluster.accessConfig.authenticationMode' \
-    --output text 2>/dev/null || echo "CONFIG_MAP")"
-
-  echo "EKS authentication mode: ${auth_mode}"
-
-  case "${auth_mode}" in
-    API)
-      echo "::error::API authentication mode is unsupported for managed node groups (use API_AND_CONFIG_MAP + aws-auth)." >&2
-      return 1
-      ;;
-    CONFIG_MAP)
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        bash "${script_dir}/delete-node-access-entry.sh" || true
-      echo "Merging node role into aws-auth mapRoles..."
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        python3 "${script_dir}/merge-aws-auth-maproles.py"
-      ;;
-    API_AND_CONFIG_MAP)
-      echo "Merging node role into aws-auth mapRoles..."
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        python3 "${script_dir}/merge-aws-auth-maproles.py"
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        bash "${script_dir}/ensure-node-access-entry.sh"
-      ;;
-    *)
-      echo "::error::Unsupported authentication mode: ${auth_mode}"
-      return 1
-      ;;
-  esac
+  CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
+    bash "${script_dir}/prepare-managed-node-aws-auth.sh"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

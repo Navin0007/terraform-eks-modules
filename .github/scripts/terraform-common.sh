@@ -1869,7 +1869,7 @@ import_eks_node_access_to_state() {
 
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" 2>/dev/null || true
-  echo "Node access entry is EKS-managed for managed node groups (not imported into Terraform state)."
+  echo "Node access entry is not Terraform-managed; managed nodes use aws-auth mapRoles in API_AND_CONFIG_MAP."
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
@@ -2049,7 +2049,7 @@ cleanup_stale_eks_auth_state() {
       --region "${AWS_REGION}" \
       --query 'cluster.accessConfig.authenticationMode' \
       --output text 2>/dev/null || echo "unknown")"
-    echo "Auth mode ${auth_mode}: node access entry is EKS-managed for API mode managed node groups."
+    echo "Auth mode ${auth_mode}: managed node groups use aws-auth; remove CLI-created access entries in prepare-managed-node-aws-auth.sh."
   fi
 
   [ "${did_pushd}" = true ] && popd >/dev/null
@@ -2148,15 +2148,13 @@ ensure_node_cluster_auth_for_dev() {
         echo "::error::Node role ${node_role_arn} not found in aws-auth mapRoles."
         return 1
       fi
-      echo "aws-auth mapRoles contains node role."
-      if ! aws eks describe-access-entry \
+      echo "aws-auth mapRoles contains node role (managed nodes join via aws-auth in API_AND_CONFIG_MAP)."
+      if aws eks describe-access-entry \
         --cluster-name "${cluster_name}" \
         --principal-arn "${node_role_arn}" \
         --region "${AWS_REGION}" &>/dev/null; then
-        echo "::error::EC2_LINUX access entry missing for API_AND_CONFIG_MAP (both entry and aws-auth are required)."
-        return 1
+        echo "::warning::Node access entry still present — CLI entries can block aws-auth for managed node groups."
       fi
-      echo "EC2_LINUX access entry present (API_AND_CONFIG_MAP)."
       ;;
     CONFIG_MAP | *)
       echo "--- aws-auth mapRoles after ensure ---"
@@ -2200,7 +2198,7 @@ apply_aws_auth_node_role_target() {
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
 
-# Repair stuck node join when aws-auth is correct but EC2_LINUX access entry was removed.
+# Repair stuck node join: remove CLI access entries, refresh aws-auth, recycle instances.
 repair_dev_node_join_if_needed() {
   local dev_abs="${1:-environments/dev}"
   local cluster_name nodegroup_name node_role_arn repo_root
@@ -2271,7 +2269,7 @@ repair_dev_node_join_if_needed() {
     return 0
   fi
 
-  echo "Recycling node group instances so kubelets pick up access entry + aws-auth..."
+  echo "Recycling node group instances so kubelets pick up aws-auth..."
   CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
     NODEGROUP_NAME="${nodegroup_name}" \
     bash "${repo_root}/modules/eks/scripts/recycle-nodegroup-instances.sh"
@@ -2306,7 +2304,7 @@ diagnose_node_join_failure() {
     --query 'cluster.accessConfig.authenticationMode' \
     --output text 2>/dev/null || echo "unknown")"
 
-  echo "--- access entry for node role (API_AND_CONFIG_MAP needs EC2_LINUX entry + aws-auth) ---"
+  echo "--- access entry for node role (managed nodes: no CLI entry; use aws-auth in API_AND_CONFIG_MAP) ---"
   if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
@@ -2317,7 +2315,7 @@ diagnose_node_join_failure() {
       --region "${AWS_REGION}" \
       --output json 2>/dev/null || true
     if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
-      echo "EC2_LINUX access entry present (required with aws-auth for API_AND_CONFIG_MAP)."
+      echo "::error::CLI/EKS access entry present — blocks aws-auth for managed nodes. Delete entry and re-run apply."
     fi
     echo "--- associated access policies for node role (EC2_LINUX entries cannot use these) ---"
     aws eks list-associated-access-policies \
@@ -2332,7 +2330,7 @@ diagnose_node_join_failure() {
     if [ "${auth_mode}" = "API" ]; then
       echo "::error::Node access entry missing — API mode requires EC2_LINUX entry for the node role."
     elif [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
-      echo "::error::EC2_LINUX access entry missing — API_AND_CONFIG_MAP requires both access entry and aws-auth mapRoles."
+      echo "(no access entry — expected for managed nodes using aws-auth mapRoles)"
     else
       echo "(no access entry for node role — OK for CONFIG_MAP + aws-auth only)"
     fi
