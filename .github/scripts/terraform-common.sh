@@ -2286,29 +2286,328 @@ repair_dev_node_join_if_needed() {
     }
 }
 
+# Required AWS-managed policies on the EKS node IAM role.
+diag_node_required_iam_policies() {
+  printf '%s\n' \
+    "AmazonEKSWorkerNodePolicy" \
+    "AmazonEKS_CNI_Policy" \
+    "AmazonEC2ContainerRegistryReadOnly"
+}
+
+# CHECK 1 — aws-auth mapRoles contains the node role with correct groups.
+diag_node_join_check_aws_auth() {
+  local cluster_name="$1"
+  local node_role_arn="$2"
+  local auth_mode="$3"
+  local map_roles aws_auth_ok=false
+
+  echo ""
+  echo "========== CHECK 1: aws-auth gatekeeper (mapRoles) =========="
+  echo "Expected node role ARN: ${node_role_arn}"
+  echo "If this ARN is missing or mistyped in mapRoles, kubelet gets Unauthorized."
+
+  if [ "${auth_mode}" = "API" ]; then
+    echo "SKIP: cluster auth mode is API (uses access entries, not aws-auth)."
+    return 0
+  fi
+
+  aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+
+  if ! kubectl get configmap aws-auth -n kube-system &>/dev/null; then
+    echo "RESULT: FAIL — ConfigMap aws-auth not found in kube-system."
+    echo "  Managed node groups normally create it when the node group is created."
+    return 1
+  fi
+
+  map_roles="$(kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null || true)"
+  echo "--- mapRoles ---"
+  if [ -n "${map_roles}" ]; then
+    printf '%s\n' "${map_roles}"
+  else
+    echo "(empty or unreadable)"
+  fi
+
+  if printf '%s\n' "${map_roles}" | grep -Fq "${node_role_arn}"; then
+    echo "RESULT: PASS — exact node role ARN found in mapRoles."
+    aws_auth_ok=true
+  else
+    echo "RESULT: FAIL — node role ARN not found in mapRoles (typo or missing entry)."
+  fi
+
+  if printf '%s\n' "${map_roles}" | grep -Fq "system:bootstrappers"; then
+    echo "RESULT: PASS — system:bootstrappers group present in mapRoles."
+  else
+    echo "RESULT: FAIL — system:bootstrappers missing from mapRoles."
+    aws_auth_ok=false
+  fi
+
+  if printf '%s\n' "${map_roles}" | grep -Fq "system:nodes"; then
+    echo "RESULT: PASS — system:nodes group present in mapRoles."
+  else
+    echo "RESULT: FAIL — system:nodes missing from mapRoles."
+    aws_auth_ok=false
+  fi
+
+  if printf '%s\n' "${map_roles}" | grep -Fq 'system:node:{{EC2PrivateDNSName}}'; then
+    echo "RESULT: PASS — username template system:node:{{EC2PrivateDNSName}} present."
+  else
+    echo "RESULT: WARN — expected username template system:node:{{EC2PrivateDNSName}} not seen."
+  fi
+
+  [ "${aws_auth_ok}" = true ]
+}
+
+# CHECK 2 — who is responsible for writing aws-auth in this repo.
+diag_node_join_check_aws_auth_ownership() {
+  local cluster_name="$1"
+  local nodegroup_name="$2"
+  local ng_status map_roles
+
+  echo ""
+  echo "========== CHECK 2: Who updates aws-auth? =========="
+  echo "In this repo:"
+  echo "  • EKS (primary): aws_eks_node_group creates/updates kube-system/aws-auth on node group create."
+  echo "  • Terraform: does NOT pre-merge aws-auth (modules/eks/aws_auth.tf — comment only)."
+  echo "  • CI fallback: prepare-managed-node-aws-auth.sh on repair if role missing from mapRoles."
+  echo "  • CI reset: delete-node-access-entry.sh + delete failed NG before recreate."
+
+  ng_status="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.status' \
+    --output text 2>/dev/null || echo "NOT_FOUND")"
+
+  echo "Node group ${nodegroup_name} status: ${ng_status}"
+
+  aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+  if kubectl get configmap aws-auth -n kube-system &>/dev/null; then
+    map_roles="$(kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null || true)"
+    if [ -n "${map_roles}" ]; then
+      echo "RESULT: PASS — aws-auth ConfigMap exists (EKS or CI wrote it)."
+    else
+      echo "RESULT: WARN — aws-auth exists but mapRoles is empty; nobody has mapped node roles yet."
+    fi
+  elif [ "${ng_status}" = "NOT_FOUND" ] || [ "${ng_status}" = "DELETING" ]; then
+    echo "RESULT: INFO — no aws-auth yet (node group not created or was deleted)."
+  else
+    echo "RESULT: FAIL — node group exists but aws-auth ConfigMap is missing."
+  fi
+}
+
+# CHECK 3 — node IAM role has worker/CNI/ECR policies attached.
+diag_node_join_check_iam_policies() {
+  local node_role_arn="$1"
+  local role_name policy missing=0
+
+  role_name="${node_role_arn##*/}"
+
+  echo ""
+  echo "========== CHECK 3: Node IAM role policies =========="
+  echo "Role: ${node_role_arn}"
+  echo "Required AWS-managed policies for bootstrap + CNI + image pull:"
+
+  if ! aws iam get-role --role-name "${role_name}" &>/dev/null; then
+    echo "RESULT: FAIL — IAM role ${role_name} does not exist."
+    return 1
+  fi
+
+  echo "--- attached policies ---"
+  local attached
+  attached="$(aws iam list-attached-role-policies \
+    --role-name "${role_name}" \
+    --output text 2>/dev/null || true)"
+  if [ -n "${attached}" ]; then
+    printf '%s\n' "${attached}"
+  else
+    echo "(none or could not list)"
+  fi
+
+  while IFS= read -r policy; do
+    [ -z "${policy}" ] && continue
+    if printf '%s\n' "${attached}" | grep -q "${policy}"; then
+      echo "RESULT: PASS — ${policy} attached."
+    else
+      echo "RESULT: FAIL — ${policy} NOT attached (node cannot bootstrap/pull images/CNI)."
+      missing=$((missing + 1))
+    fi
+  done < <(diag_node_required_iam_policies)
+
+  echo "--- inline policies (informational) ---"
+  aws iam list-role-policies --role-name "${role_name}" --output text 2>/dev/null \
+    || echo "(none or could not list)"
+
+  [ "${missing}" -eq 0 ]
+}
+
+# CHECK 4 — nodes can reach the Kubernetes API (endpoint, routes, SGs, VPC endpoints).
+diag_node_join_check_network() {
+  local cluster_name="$1"
+  local nodegroup_name="$2"
+  local vpc_id cluster_sg private_access public_access
+  local subnet_ids subnet_id rt nat_ok=false endpoints_ok=true
+
+  echo ""
+  echo "========== CHECK 4: Node → control plane network =========="
+  echo "Unauthorized usually means auth failed, but unreachable API can look similar in logs."
+  echo "Verify endpoint access, private subnet routing, and cluster security group rules."
+
+  vpc_id="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.resourcesVpcConfig.vpcId' \
+    --output text 2>/dev/null || echo "")"
+  cluster_sg="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' \
+    --output text 2>/dev/null || echo "")"
+  private_access="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.resourcesVpcConfig.endpointPrivateAccess' \
+    --output text 2>/dev/null || echo "unknown")"
+  public_access="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.resourcesVpcConfig.endpointPublicAccess' \
+    --output text 2>/dev/null || echo "unknown")"
+
+  echo "--- cluster API endpoint ---"
+  aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.{endpoint:endpoint,privateAccess:resourcesVpcConfig.endpointPrivateAccess,publicAccess:resourcesVpcConfig.endpointPublicAccess,vpcId:resourcesVpcConfig.vpcId,clusterSecurityGroupId:resourcesVpcConfig.clusterSecurityGroupId,extraSecurityGroups:resourcesVpcConfig.securityGroupIds}' \
+    --output json 2>/dev/null || true
+
+  if [ "${private_access}" = "True" ] || [ "${private_access}" = "true" ]; then
+    echo "RESULT: PASS — private API endpoint enabled (nodes in VPC should use it)."
+  else
+    echo "RESULT: WARN — private API endpoint disabled; nodes rely on public endpoint + NAT."
+  fi
+
+  subnet_ids="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.subnets' \
+    --output text 2>/dev/null || echo "")"
+
+  echo "--- node group subnets ---"
+  if [ -n "${subnet_ids}" ] && [ "${subnet_ids}" != "None" ]; then
+    printf '  %s\n' ${subnet_ids}
+  else
+    echo "  (node group not found or no subnets)"
+  fi
+
+  echo "--- private subnet routes (need NAT or egress for public API / image pull) ---"
+  for subnet_id in ${subnet_ids}; do
+    [ -z "${subnet_id}" ] || [ "${subnet_id}" = "None" ] && continue
+    echo "Subnet ${subnet_id}:"
+    aws ec2 describe-route-tables \
+      --filters "Name=association.subnet-id,Values=${subnet_id}" \
+      --region "${AWS_REGION}" \
+      --query 'RouteTables[0].Routes' \
+      --output table 2>/dev/null || echo "  (could not read route table)"
+    if aws ec2 describe-route-tables \
+      --filters "Name=association.subnet-id,Values=${subnet_id}" \
+      --region "${AWS_REGION}" \
+      --query 'RouteTables[0].Routes[?NatGatewayId!=null || GatewayId!=null]' \
+      --output text 2>/dev/null | grep -q .; then
+      echo "  RESULT: PASS — default route via NAT gateway or IGW present."
+      nat_ok=true
+    else
+      echo "  RESULT: WARN — no NAT/IGW default route; outbound internet may fail."
+    fi
+  done
+
+  if [ -n "${vpc_id}" ] && [ "${vpc_id}" != "None" ]; then
+    echo "--- VPC interface endpoints (recommended for private nodes) ---"
+    aws ec2 describe-vpc-endpoints \
+      --filters "Name=vpc-id,Values=${vpc_id}" \
+      --region "${AWS_REGION}" \
+      --query 'VpcEndpoints[].{Service:ServiceName,State:State}' \
+      --output table 2>/dev/null || true
+    for svc in "com.amazonaws.${AWS_REGION}.eks" "com.amazonaws.${AWS_REGION}.sts" "com.amazonaws.${AWS_REGION}.ec2"; do
+      if aws ec2 describe-vpc-endpoints \
+        --filters "Name=vpc-id,Values=${vpc_id}" "Name=service-name,Values=${svc}" \
+        --region "${AWS_REGION}" \
+        --query 'VpcEndpoints[?State==`available`] | length(@)' \
+        --output text 2>/dev/null | grep -q '^[1-9]'; then
+        echo "RESULT: PASS — VPC endpoint ${svc} available."
+      else
+        echo "RESULT: WARN — VPC endpoint ${svc} not available (may use NAT instead)."
+        endpoints_ok=false
+      fi
+    done
+  fi
+
+  if [ -n "${cluster_sg}" ] && [ "${cluster_sg}" != "None" ]; then
+    echo "--- cluster security group (managed nodes use this SG) ---"
+    echo "ClusterSecurityGroupId=${cluster_sg}"
+    aws ec2 describe-security-groups \
+      --group-ids "${cluster_sg}" \
+      --region "${AWS_REGION}" \
+      --query 'SecurityGroups[0].IpPermissions[?FromPort==`443` || IpProtocol==`-1`]' \
+      --output json 2>/dev/null || echo "(could not read SG rules)"
+    if aws ec2 describe-security-groups \
+      --group-ids "${cluster_sg}" \
+      --region "${AWS_REGION}" \
+      --query 'SecurityGroups[0].IpPermissions[?UserIdGroupPairs[?GroupId==`'${cluster_sg}'`]]]' \
+      --output text 2>/dev/null | grep -q .; then
+      echo "RESULT: PASS — cluster SG allows traffic from itself (control plane ↔ nodes)."
+    else
+      echo "RESULT: INFO — verify cluster SG allows node ↔ API on 443 (EKS usually adds this)."
+    fi
+  fi
+
+  # Quick API reachability from CI (not from node, but confirms endpoint is up).
+  echo "--- API reachability from CI runner (not from node) ---"
+  if aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --query 'cluster.status' \
+    --output text 2>/dev/null | grep -q ACTIVE; then
+    echo "RESULT: PASS — cluster status ACTIVE (API endpoint registered)."
+  else
+    echo "RESULT: FAIL — cluster not ACTIVE."
+  fi
+
+  { [ "${nat_ok}" = true ] || [ "${public_access}" = "True" ] || [ "${public_access}" = "true" ]; } \
+    && [ "${endpoints_ok}" = true ] || [ "${nat_ok}" = true ]
+}
+
 # Print node join hints when a node group is CREATE_FAILED.
 diagnose_node_join_failure() {
   tf_export_dev_vars
   local cluster_name="${1:-$(eks_cluster_name)}"
   local nodegroup_name="${2:-general}"
+  local node_role_arn auth_mode
+  local check1=0 check3=0 check4=0
 
   echo "=== Node join diagnostics (${cluster_name}/${nodegroup_name}) ==="
+  echo "Four-pillar debug: (1) aws-auth  (2) who writes it  (3) IAM policies  (4) network"
+
   aws eks describe-cluster \
     --name "${cluster_name}" \
     --region "${AWS_REGION}" \
-    --query 'cluster.{authMode:accessConfig.authenticationMode,publicEndpoint:resourcesVpcConfig.endpointPublicAccess}' \
+    --query 'cluster.{authMode:accessConfig.authenticationMode,publicEndpoint:resourcesVpcConfig.endpointPublicAccess,privateEndpoint:resourcesVpcConfig.endpointPrivateAccess}' \
     --output json 2>/dev/null || true
 
-  local node_role_arn
   node_role_arn="$(node_iam_role_arn "${cluster_name}" 2>/dev/null || echo "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-node")"
-  local auth_mode
   auth_mode="$(aws eks describe-cluster \
     --name "${cluster_name}" \
     --region "${AWS_REGION}" \
     --query 'cluster.accessConfig.authenticationMode' \
     --output text 2>/dev/null || echo "unknown")"
 
-  echo "--- access entry for node role (API_AND_CONFIG_MAP: EKS entry + aws-auth both required) ---"
+  diag_node_join_check_aws_auth "${cluster_name}" "${node_role_arn}" "${auth_mode}" && check1=1 || check1=0
+  diag_node_join_check_aws_auth_ownership "${cluster_name}" "${nodegroup_name}"
+  diag_node_join_check_iam_policies "${node_role_arn}" && check3=1 || check3=0
+  diag_node_join_check_network "${cluster_name}" "${nodegroup_name}" && check4=1 || check4=0
+
+  echo ""
+  echo "========== CHECK 1b: EKS access entry (API_AND_CONFIG_MAP) =========="
   if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
@@ -2348,13 +2647,9 @@ diagnose_node_join_failure() {
   fi
 
   if [ "${auth_mode}" != "API" ]; then
-    echo "--- aws-auth mapRoles (node role should appear here) ---"
-    aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
-    kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null \
-      || echo "(could not read aws-auth)"
-    echo "--- RBAC node bindings (should exist on a healthy cluster) ---"
+    echo "--- RBAC node bindings (kubectl view; custom-columns may show <none>) ---"
     kubectl get clusterrolebinding system:node system:node-proxier system:node-bootstrapper \
-      -o custom-columns=NAME:.metadata.name,GROUPS:.subjects 2>/dev/null \
+      -o yaml 2>/dev/null | grep -E '^(  name:|    name: system:|    - system:)' \
       || echo "(could not read clusterrolebindings)"
   fi
 
@@ -2443,6 +2738,16 @@ diagnose_node_join_failure() {
         fi
       done
   fi
+
+  echo ""
+  echo "========== DEBUG CHECKLIST SUMMARY =========="
+  echo "  CHECK 1 aws-auth mapRoles:        $([ "${check1}" -eq 1 ] && echo PASS || echo FAIL — see CHECK 1 above)"
+  echo "  CHECK 2 aws-auth ownership:     see CHECK 2 (EKS on node group create; CI repair fallback)"
+  echo "  CHECK 3 node IAM policies:      $([ "${check3}" -eq 1 ] && echo PASS || echo FAIL — see CHECK 3 above)"
+  echo "  CHECK 4 network path:           $([ "${check4}" -eq 1 ] && echo PASS/WARN || echo WARN — see CHECK 4 above)"
+  echo "  Access entry + kubelet/instance: see sections below"
+  echo ""
+  echo "Copy this entire block from '=== Node join diagnostics' through this summary when asking for help."
 }
 
 # Scale down / delete node group before terraform destroy (faster, fewer timeouts).

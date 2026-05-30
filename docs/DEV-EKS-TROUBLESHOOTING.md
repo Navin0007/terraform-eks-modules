@@ -576,6 +576,21 @@ Re-run **apply** with `dev_eks_phase: nodes` (CI deletes `CREATE_FAILED` node gr
 
 ---
 
+## Node join: four-pillar debug (CI)
+
+On apply failure, the workflow runs `diagnose_node_join_failure` and prints **CHECK 1–4** plus a summary. Copy from `=== Node join diagnostics` through `DEBUG CHECKLIST SUMMARY`.
+
+| Check | Question | PASS means |
+|-------|----------|------------|
+| **1** | Is the node IAM role in **aws-auth** `mapRoles` (exact ARN, `system:bootstrappers`, `system:nodes`)? | Gatekeeper trusts the node role |
+| **2** | Who writes **aws-auth**? | EKS on managed node group create; CI repair only as fallback (`prepare-managed-node-aws-auth.sh`) |
+| **3** | Does the node IAM role have **WorkerNode + CNI + ECR** policies? | Node can bootstrap, run CNI, pull images |
+| **4** | Can nodes reach the **API** (private endpoint, NAT/VPC endpoints, cluster SG)? | Network path to control plane exists |
+
+Also printed: EKS access entry (1b), authenticator logs, instance IAM profile, kubelet journal.
+
+---
+
 ## Issue 18: AssociateAccessPolicy fails on EC2_LINUX access entry
 
 **Symptoms**
