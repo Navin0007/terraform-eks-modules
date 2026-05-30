@@ -166,6 +166,98 @@ dev_addons_state_prefix() {
   printf '%s' 'module.addons[0]'
 }
 
+dev_stack_enable_addons() {
+  _tf_bool_is_true "${TF_VAR_enable_eks:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_addons:-false}" && return 0
+  return 1
+}
+
+# Print EKS add-on install/destroy order and current AWS status (CI log).
+log_eks_addon_lifecycle() {
+  local operation="${1:-apply}"
+  local cluster_name
+
+  tf_export_dev_vars
+  cluster_name="$(eks_cluster_name)"
+
+  echo ""
+  echo "=== EKS add-on lifecycle order (${cluster_name}) ==="
+  echo "Operation context: ${operation}"
+  echo ""
+  echo "Full platform order (dev_eks_phase cumulative):"
+  echo "  1. [cluster]  vpc-cni                 → module.eks/aws_eks_addon.vpc_cni (before node groups)"
+  echo "  2. [nodes]    managed node group      → module.eks/aws_eks_node_group (requires vpc-cni + Ready)"
+  echo "  3. [irsa]     IAM roles for SA        → module.iam_irsa (vpc-cni aws-node, ebs-csi-controller-sa)"
+  echo "  4. [addons]   kube-proxy              → module.addons/aws_eks_addon.kube_proxy (after nodes Ready)"
+  echo "  5. [addons]   coredns                 → module.addons/aws_eks_addon.coredns (after kube-proxy)"
+  echo "  6. [addons]   aws-ebs-csi-driver      → module.addons/aws_eks_addon.aws_ebs_csi_driver (after kube-proxy + ebs-csi IRSA)"
+  echo ""
+  echo "module.addons Terraform CREATE order:"
+  echo "  (1) kube-proxy"
+  echo "  (2) coredns + aws-ebs-csi-driver   ← parallel after kube-proxy"
+  echo ""
+  echo "module.addons Terraform DESTROY order (reverse dependencies):"
+  echo "  (1) coredns + aws-ebs-csi-driver"
+  echo "  (2) kube-proxy"
+  echo ""
+  echo "Note: vpc-cni lives in module.eks; it is NOT destroyed when recreating module.addons only."
+  echo ""
+
+  case "${operation}" in
+    destroy|recreate)
+      echo "Addons-only destroy/recreate (keeps cluster + nodes) — run from environments/dev after init:"
+      echo "  terraform destroy \\"
+      echo "    -target='$(dev_addons_state_prefix).aws_eks_addon.coredns' \\"
+      echo "    -target='$(dev_addons_state_prefix).aws_eks_addon.aws_ebs_csi_driver' \\"
+      echo "    -target='$(dev_addons_state_prefix).aws_eks_addon.kube_proxy'"
+      echo "  terraform apply   # dev_eks_phase: addons (or enable_irsa + enable_addons=true)"
+      echo ""
+      echo "GitHub Actions full destroy (dev_eks_phase: addons) removes cluster, nodes, IRSA, and add-ons — not add-ons alone."
+      ;;
+    apply)
+      echo "GitHub Actions: dev_eks_phase=addons runs IRSA (if needed) then creates add-ons in order above."
+      ;;
+  esac
+
+  log_eks_addon_aws_status "${cluster_name}"
+}
+
+# Current EKS managed add-on status from AWS (for CI logs).
+log_eks_addon_aws_status() {
+  local cluster_name="${1:-$(eks_cluster_name)}"
+  local addon_name
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    echo "--- AWS EKS add-ons ---"
+    echo "(cluster ${cluster_name} not found in AWS)"
+    return 0
+  fi
+
+  echo "--- AWS EKS add-ons (cluster=${cluster_name}, region=${AWS_REGION}) ---"
+  aws eks list-addons \
+    --cluster-name "${cluster_name}" \
+    --region "${AWS_REGION}" \
+    --output text 2>/dev/null || echo "(could not list add-ons)"
+
+  for addon_name in vpc-cni kube-proxy coredns aws-ebs-csi-driver; do
+    if aws eks describe-addon \
+      --cluster-name "${cluster_name}" \
+      --addon-name "${addon_name}" \
+      --region "${AWS_REGION}" &>/dev/null; then
+      aws eks describe-addon \
+        --cluster-name "${cluster_name}" \
+        --addon-name "${addon_name}" \
+        --region "${AWS_REGION}" \
+        --query 'addon.{name:addonName,status:status,version:addonVersion,health:health.issues}' \
+        --output json 2>/dev/null \
+        || echo "${addon_name}: (describe failed)"
+    else
+      echo "${addon_name}: (not installed)"
+    fi
+  done
+  echo ""
+}
+
 dev_eks_cluster_state_addr() {
   printf '%s\n' "$(dev_eks_state_prefix).aws_eks_cluster.main"
 }
@@ -2851,6 +2943,10 @@ dev_stack_destroy_prep() {
   cluster_name="$(eks_cluster_name)"
   nodegroup_name="general"
 
+  if dev_stack_enable_addons; then
+    log_eks_addon_lifecycle destroy
+  fi
+
   if ! eks_cluster_exists_in_aws "${cluster_name}"; then
     echo "EKS cluster ${cluster_name} not found; skipping node group teardown."
     return 0
@@ -3223,6 +3319,10 @@ dev_stack_prepare() {
   reset_stale_eks_managed_nodegroup
   delete_failed_eks_node_groups "${dev_abs}"
   repair_dev_node_join_if_needed "${dev_abs}"
+
+  if dev_stack_enable_addons; then
+    log_eks_addon_lifecycle apply
+  fi
 }
 
 # Import cluster-level EKS resources (log group, OIDC, vpc-cni) when AWS has them but state was cleared.
@@ -3498,6 +3598,11 @@ dev_stack_apply_summary() {
       echo "${output} = $(terraform output -no-color "${output}" 2>/dev/null || true)"
     fi
   done
+
+  if dev_stack_enable_addons; then
+    echo ""
+    log_eks_addon_lifecycle apply
+  fi
 
   if [ "${did_pushd}" = true ]; then
     popd >/dev/null

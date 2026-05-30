@@ -76,7 +76,15 @@ Then enable EKS in **four cumulative passes** (each pass keeps prior flags `true
 | **1 — cluster** | `enable_eks_cluster = true` | EKS cluster, OIDC, CloudWatch logs, vpc-cni add-on |
 | **2 — nodes** | + `enable_eks_nodes = true` | Managed node group, access entry, aws-auth wiring |
 | **3 — IRSA** | + `enable_irsa = true` | IRSA roles for vpc-cni and ebs-csi |
-| **4 — add-ons** | + `enable_addons = true` | kube-proxy, CoreDNS, EBS CSI driver |
+| **4 — add-ons** | + `enable_addons = true` | kube-proxy → CoreDNS + EBS CSI driver (see order below) |
+
+**Add-on install order** (also printed in CI as `=== EKS add-on lifecycle order ===`):
+
+1. **vpc-cni** — cluster phase (`module.eks`), before nodes  
+2. **kube-proxy** — addons phase (`module.addons`), after nodes Ready  
+3. **coredns** + **aws-ebs-csi-driver** — parallel after kube-proxy (EBS CSI needs IRSA from phase 3)
+
+Destroy order for `module.addons` only is reverse: coredns + ebs-csi → kube-proxy. vpc-cni stays in `module.eks` until cluster destroy.
 
 Shortcut: `enable_eks = true` enables all four phases in one apply.
 
