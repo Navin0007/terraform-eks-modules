@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove EKS access entries for the node IAM role (CLI entries block aws-auth for managed nodes).
+# Remove a stale node access entry (used when resetting CREATE_FAILED node groups).
 set -euo pipefail
 
 delete_node_access_entry() {

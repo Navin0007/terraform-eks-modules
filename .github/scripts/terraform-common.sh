@@ -2003,6 +2003,12 @@ delete_failed_eks_node_groups() {
 
   case "${status}" in
     CREATE_FAILED)
+      local node_role_arn repo_root
+      node_role_arn="$(node_iam_role_arn "${cluster_name}")"
+      repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+      echo "Resetting node access entry before recreating failed node group ${nodegroup_name}..."
+      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+        bash "${repo_root}/modules/eks/scripts/delete-node-access-entry.sh" || true
       echo "Deleting failed node group ${nodegroup_name} (status=${status})..."
       aws eks delete-nodegroup \
         --cluster-name "${cluster_name}" \
@@ -2223,6 +2229,17 @@ repair_dev_node_join_if_needed() {
     return 0
   fi
 
+  status="$(aws eks describe-nodegroup \
+    --cluster-name "${cluster_name}" \
+    --nodegroup-name "${nodegroup_name}" \
+    --region "${AWS_REGION}" \
+    --query 'nodegroup.status' \
+    --output text 2>/dev/null || echo "unknown")"
+
+  if [ "${status}" = "CREATE_FAILED" ] || [ "${status}" = "DELETING" ]; then
+    return 0
+  fi
+
   node_role_arn="$(node_iam_role_arn "${cluster_name}")"
   desired="$(aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
@@ -2296,13 +2313,20 @@ diagnose_node_join_failure() {
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
     --region "${AWS_REGION}" &>/dev/null; then
+    local entry_type
+    entry_type="$(aws eks describe-access-entry \
+      --cluster-name "${cluster_name}" \
+      --principal-arn "${node_role_arn}" \
+      --region "${AWS_REGION}" \
+      --query 'accessEntry.type' \
+      --output text 2>/dev/null || echo "unknown")"
     aws eks describe-access-entry \
       --cluster-name "${cluster_name}" \
       --principal-arn "${node_role_arn}" \
       --region "${AWS_REGION}" \
       --output json 2>/dev/null || true
-    if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
-      echo "::error::CLI/EKS access entry present — blocks aws-auth for managed nodes. Delete entry and re-run apply."
+    if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ] && [ "${entry_type}" = "EC2_LINUX" ]; then
+      echo "EKS EC2_LINUX access entry present (required with aws-auth mapRoles in API_AND_CONFIG_MAP)."
     fi
     echo "--- associated access policies for node role (EC2_LINUX entries cannot use these) ---"
     aws eks list-associated-access-policies \
@@ -2335,15 +2359,17 @@ diagnose_node_join_failure() {
   fi
 
   local log_group="/aws/eks/${cluster_name}/cluster"
-  echo "--- authenticator log (Identity is not mapped / access denied, last 15 min) ---"
+  local start_ms
+  start_ms=$(( ($(date +%s) - 900) * 1000 ))
+  echo "--- authenticator log (last 15 min; deny/mapped/granted) ---"
   aws logs filter-log-events \
     --log-group-name "${log_group}" \
     --region "${AWS_REGION}" \
-    --start-time "$(($(date +%s) * 1000 - 900000))" \
-    --filter-pattern '"Identity is not mapped" || "access denied"' \
-    --query 'events[-5:].message' \
+    --start-time "${start_ms}" \
+    --filter-pattern "?access ?denied ?mapped ?granted ?Unauthorized" \
+    --query 'events[-8:].message' \
     --output text 2>/dev/null \
-    || echo "(no authenticator deny lines or log group unavailable)"
+    || echo "(no matching authenticator lines — check log group /aws/eks/${cluster_name}/cluster)"
 
   aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
@@ -2796,9 +2822,8 @@ dev_stack_prepare() {
   import_eks_node_access_to_state "${dev_abs}"
   apply_eks_public_endpoint_if_needed "${dev_abs}"
   reset_stale_eks_managed_nodegroup
-  repair_dev_node_join_if_needed "${dev_abs}"
-  apply_aws_auth_node_role_target "${dev_abs}"
   delete_failed_eks_node_groups "${dev_abs}"
+  repair_dev_node_join_if_needed "${dev_abs}"
 }
 
 # Import cluster-level EKS resources (log group, OIDC, vpc-cni) when AWS has them but state was cleared.
