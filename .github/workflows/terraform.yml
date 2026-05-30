@@ -42,7 +42,7 @@ on:
           - global/policies
           - environments/dev
       dev_eks_phase:
-        description: "Dev EKS phase (cumulative) — none=foundation only; cluster→nodes→irsa→addons; all=everything"
+        description: "Dev EKS phase — use addons-only to destroy/recreate add-ons without touching VPC/cluster"
         type: choice
         default: none
         options:
@@ -51,6 +51,7 @@ on:
           - nodes
           - irsa
           - addons
+          - addons-only
           - all
 
 permissions:
@@ -171,6 +172,7 @@ jobs:
         run: |
           source .github/scripts/terraform-common.sh
           apply_dev_eks_phase_from_input "${{ inputs.dev_eks_phase }}"
+          echo "DEV_EKS_PHASE=${{ inputs.dev_eks_phase }}" >> "$GITHUB_ENV"
           {
             echo "TF_VAR_enable_eks=${TF_VAR_enable_eks}"
             echo "TF_VAR_enable_eks_cluster=${TF_VAR_enable_eks_cluster}"
@@ -311,11 +313,15 @@ jobs:
         if: inputs.operation == 'destroy' && (inputs.target == 'all' || inputs.target == 'environments/dev')
         run: |
           source .github/scripts/terraform-common.sh
-          pushd environments/dev >/dev/null
-          mapfile -t var_args < <(tf_var_args)
-          mapfile -t dev_args < <(tf_dev_extra_var_args)
-          terraform destroy -input=false -auto-approve -no-color "${var_args[@]}" "${dev_args[@]}"
-          popd >/dev/null
+          if [ "${DEV_EKS_PHASE:-}" = "addons-only" ]; then
+            dev_destroy_addons_only environments/dev
+          else
+            pushd environments/dev >/dev/null
+            mapfile -t var_args < <(tf_var_args)
+            mapfile -t dev_args < <(tf_dev_extra_var_args)
+            terraform destroy -input=false -auto-approve -no-color "${var_args[@]}" "${dev_args[@]}"
+            popd >/dev/null
+          fi
 
       - name: Dev plan
         if: inputs.operation == 'plan' && (inputs.target == 'all' || inputs.target == 'environments/dev')

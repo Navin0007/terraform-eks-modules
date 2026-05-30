@@ -90,6 +90,14 @@ Shortcut: `enable_eks = true` enables all four phases in one apply.
 
 **GitHub Actions:** **target** `environments/dev` (or `all`), set **dev_eks_phase** to `none` → `cluster` → `nodes` → `irsa` → `addons` (or `all` once). Each choice turns on the cumulative flags automatically.
 
+**Destroy add-ons only (keep cluster, nodes, VPC):** use **dev_eks_phase: `addons-only`** + **operation: destroy**. Do **not** use `addons` for destroy — that removes the entire dev stack including VPC.
+
+| Operation | dev_eks_phase | Effect |
+|-----------|---------------|--------|
+| apply | `addons` or `addons-only` | Create IRSA + add-ons |
+| destroy | **`addons-only`** | Remove add-ons only (`enable_addons=false` apply) |
+| destroy | `addons` | **Full dev stack destroy** (cluster, nodes, VPC, …) |
+
 From this directory:
 
 ```bash

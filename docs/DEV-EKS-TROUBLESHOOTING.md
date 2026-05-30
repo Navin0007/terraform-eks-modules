@@ -719,6 +719,36 @@ Gate add-on install on CCM init complete (no `uninitialized` taint + topology la
 
 ---
 
+## Issue 28: Destroy with dev_eks_phase `addons` deletes VPC / full stack
+
+**Symptoms**
+
+- GitHub Actions **destroy** with `dev_eks_phase: addons` runs for a long time and tries to delete `module.vpc`, EKS cluster, node groups, etc.
+- Error: `DependencyViolation: The vpc '...' has dependencies and cannot be deleted`
+- You intended to destroy **add-ons only**
+
+**Cause**
+
+`dev_eks_phase: addons` is **cumulative** for both apply and destroy: it enables cluster + nodes + IRSA + add-ons, so `terraform destroy` removes the **entire dev stack**, not just `module.addons`.
+
+**Fix**
+
+| Goal | Workflow settings |
+|------|-----------------|
+| Destroy add-ons only | `operation: destroy`, `dev_eks_phase: **addons-only**`, `target: environments/dev` |
+| Recreate add-ons | `operation: apply`, `dev_eks_phase: addons-only` (or `addons`) |
+| Destroy everything | `dev_eks_phase: addons` or `all` (expect VPC dependency errors if order fails) |
+
+`addons-only` destroy runs `dev_destroy_addons_only`: `enable_addons=false` apply removes `module.addons` only; cluster, nodes, IRSA, and VPC stay.
+
+**If a full destroy failed mid-way**
+
+1. Check what still exists: `aws eks describe-cluster --name my-project-dev-eks`, `kubectl get nodes`
+2. Do **not** re-run full destroy unless you mean to tear down the whole stack
+3. Use `addons-only` destroy/apply to recycle add-ons on a surviving cluster
+
+---
+
 ## Issue 18: AssociateAccessPolicy fails on EC2_LINUX access entry
 
 **Symptoms**

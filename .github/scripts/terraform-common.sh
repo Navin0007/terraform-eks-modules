@@ -98,7 +98,7 @@ apply_dev_eks_phase_from_input() {
       export TF_VAR_enable_eks_nodes=true
       export TF_VAR_enable_irsa=true
       ;;
-    addons)
+    addons|addons-only)
       export TF_VAR_enable_eks_cluster=true
       export TF_VAR_enable_eks_nodes=true
       export TF_VAR_enable_irsa=true
@@ -107,7 +107,7 @@ apply_dev_eks_phase_from_input() {
     none | foundation | "")
       ;;
     *)
-      echo "::error::Unknown dev_eks_phase: ${phase} (use none, cluster, nodes, irsa, addons, or all)" >&2
+      echo "::error::Unknown dev_eks_phase: ${phase} (use none, cluster, nodes, irsa, addons, addons-only, or all)" >&2
       return 1
       ;;
   esac
@@ -212,10 +212,12 @@ log_eks_addon_lifecycle() {
       echo "    -target='$(dev_addons_state_prefix).aws_eks_addon.kube_proxy'"
       echo "  terraform apply   # dev_eks_phase: addons (or enable_irsa + enable_addons=true)"
       echo ""
-      echo "GitHub Actions full destroy (dev_eks_phase: addons) removes cluster, nodes, IRSA, and add-ons — not add-ons alone."
+      echo "GitHub Actions full destroy (dev_eks_phase: addons) removes cluster, nodes, IRSA, VPC, and add-ons."
+      echo "  → To destroy add-ons ONLY, use dev_eks_phase: addons-only (not addons)."
       ;;
     apply)
-      echo "GitHub Actions: dev_eks_phase=addons runs IRSA (if needed) then creates add-ons in order above."
+      echo "GitHub Actions: dev_eks_phase=addons (or addons-only) runs IRSA then creates add-ons in order above."
+      echo "  → dev_eks_phase=addons-only + destroy removes add-ons only; + apply recreates them."
       ;;
   esac
 
@@ -256,6 +258,45 @@ log_eks_addon_aws_status() {
     fi
   done
   echo ""
+}
+
+# Remove module.addons only (keep cluster, nodes, IRSA, VPC). Uses enable_addons=false apply.
+dev_destroy_addons_only() {
+  local dev_abs="${1:-environments/dev}"
+  local did_pushd=false
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+  tf_init_s3_backend "${dev_abs}" dev/terraform.tfstate
+
+  echo ""
+  echo "=== Dev add-ons only destroy (cluster + nodes + VPC unchanged) ==="
+  log_eks_addon_lifecycle destroy
+
+  export TF_VAR_enable_eks=false
+  export TF_VAR_enable_eks_cluster=true
+  export TF_VAR_enable_eks_nodes=true
+  export TF_VAR_enable_irsa=true
+  export TF_VAR_enable_addons=false
+
+  echo "Applying with enable_addons=false (module.addons count=0 destroys kube-proxy, coredns, aws-ebs-csi-driver)..."
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t dev_args < <(tf_dev_extra_var_args)
+  terraform apply -input=false -auto-approve -no-color "${var_args[@]}" "${dev_args[@]}"
+
+  echo ""
+  echo "Add-ons destroyed. Re-run apply with dev_eks_phase: addons-only (or addons) to recreate."
+  log_eks_addon_aws_status "$(eks_cluster_name)"
+
+  if [ "${did_pushd}" = true ]; then
+    popd >/dev/null
+  fi
 }
 
 dev_eks_cluster_state_addr() {
@@ -2942,6 +2983,12 @@ dev_stack_destroy_prep() {
   local cluster_name nodegroup_name status
   cluster_name="$(eks_cluster_name)"
   nodegroup_name="general"
+
+  if [ "${DEV_EKS_PHASE:-}" = "addons-only" ]; then
+    echo "dev_eks_phase=addons-only: skipping node group teardown (add-ons-only destroy)."
+    log_eks_addon_lifecycle destroy
+    return 0
+  fi
 
   if dev_stack_enable_addons; then
     log_eks_addon_lifecycle destroy
