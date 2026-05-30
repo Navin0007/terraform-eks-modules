@@ -1767,13 +1767,12 @@ upgrade_eks_authentication_mode_if_needed() {
     return 0
   fi
 
-  local repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-  CLUSTER_NAME="${cluster_name}" AWS_REGION="${AWS_REGION}" \
-    bash "${repo_root}/modules/eks/scripts/upgrade-eks-authentication-mode.sh"
+  # Dev managed node groups use CONFIG_MAP + aws-auth; never upgrade in-place.
+  echo "Skipping CONFIG_MAP → API_AND_CONFIG_MAP upgrade (managed nodes use CONFIG_MAP + aws-auth)."
+  return 0
 }
 
-# API mode is irreversible and breaks managed node groups. Recreate the cluster with
-# API_AND_CONFIG_MAP (see environments/dev authentication_mode).
+# Managed nodes need CONFIG_MAP + aws-auth. Recreate clusters in API or API_AND_CONFIG_MAP.
 recover_dev_cluster_if_api_mode() {
   local dev_abs="${1:-environments/dev}"
   local cluster_name auth_mode node_role_arn repo_root did_pushd=false
@@ -1794,12 +1793,12 @@ recover_dev_cluster_if_api_mode() {
     --query 'cluster.accessConfig.authenticationMode' \
     --output text)"
 
-  if [ "${auth_mode}" != "API" ]; then
+  if [ "${auth_mode}" = "CONFIG_MAP" ]; then
     return 0
   fi
 
-  echo "::warning::Cluster ${cluster_name} is in API auth mode (irreversible)."
-  echo "Managed node groups require API_AND_CONFIG_MAP. Deleting cluster for recreation..."
+  echo "::warning::Cluster ${cluster_name} auth mode is ${auth_mode}."
+  echo "Managed node groups require CONFIG_MAP + aws-auth. Deleting cluster for recreation..."
 
   node_role_arn="$(node_iam_role_arn "${cluster_name}")"
 
@@ -1847,7 +1846,7 @@ recover_dev_cluster_if_api_mode() {
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 
-  echo "EKS cluster removed. This apply will recreate it with API_AND_CONFIG_MAP."
+  echo "EKS cluster removed. This apply will recreate it with CONFIG_MAP."
 }
 
 # Deprecated: do not migrate to API mode (breaks managed node groups).
@@ -1869,7 +1868,7 @@ import_eks_node_access_to_state() {
 
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_entry.node[0]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" 2>/dev/null || true
-  echo "Node access entry is not Terraform-managed; managed nodes use aws-auth mapRoles in API_AND_CONFIG_MAP."
+  echo "Node access entry is not Terraform-managed; managed nodes use aws-auth mapRoles in CONFIG_MAP."
 
   [ "${did_pushd}" = true ] && popd >/dev/null
 }
@@ -2232,7 +2231,7 @@ repair_dev_node_join_if_needed() {
     --query 'cluster.accessConfig.authenticationMode' \
     --output text 2>/dev/null || echo "unknown")"
 
-  if [ "${auth_mode}" != "API_AND_CONFIG_MAP" ]; then
+  if [ "${auth_mode}" != "CONFIG_MAP" ]; then
     return 0
   fi
 
@@ -2304,7 +2303,7 @@ diagnose_node_join_failure() {
     --query 'cluster.accessConfig.authenticationMode' \
     --output text 2>/dev/null || echo "unknown")"
 
-  echo "--- access entry for node role (managed nodes: no CLI entry; use aws-auth in API_AND_CONFIG_MAP) ---"
+  echo "--- access entry for node role (managed nodes: no CLI entry; use aws-auth in CONFIG_MAP) ---"
   if aws eks describe-access-entry \
     --cluster-name "${cluster_name}" \
     --principal-arn "${node_role_arn}" \
@@ -2330,7 +2329,7 @@ diagnose_node_join_failure() {
     if [ "${auth_mode}" = "API" ]; then
       echo "::error::Node access entry missing — API mode requires EC2_LINUX entry for the node role."
     elif [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
-      echo "(no access entry — expected for managed nodes using aws-auth mapRoles)"
+      echo "(no access entry — aws-auth may not work for managed nodes; recreate cluster as CONFIG_MAP — Issue 24)"
     else
       echo "(no access entry for node role — OK for CONFIG_MAP + aws-auth only)"
     fi
@@ -2341,6 +2340,10 @@ diagnose_node_join_failure() {
     aws eks update-kubeconfig --name "${cluster_name}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
     kubectl get configmap aws-auth -n kube-system -o jsonpath='{.data.mapRoles}' 2>/dev/null \
       || echo "(could not read aws-auth)"
+    echo "--- RBAC node bindings (should exist on a healthy cluster) ---"
+    kubectl get clusterrolebinding system:node system:node-proxier system:node-bootstrapper \
+      -o custom-columns=NAME:.metadata.name,GROUPS:.subjects 2>/dev/null \
+      || echo "(could not read clusterrolebindings)"
   fi
 
   aws eks describe-nodegroup \

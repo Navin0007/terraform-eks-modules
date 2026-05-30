@@ -1,4 +1,4 @@
-# Managed node groups in API_AND_CONFIG_MAP join via aws-auth mapRoles (remove stale CLI access entries in CI).
+# Managed node groups join via aws-auth mapRoles (CONFIG_MAP).
 resource "null_resource" "aws_auth_node_role" {
   count = var.manage_aws_auth_configmap && var.enable_node_groups ? 1 : 0
 
@@ -6,8 +6,7 @@ resource "null_resource" "aws_auth_node_role" {
     cluster_name  = aws_eks_cluster.main.name
     node_role_arn = var.node_role_arn
     region        = var.region
-    # Re-run when auth mode or role changes.
-    auth_mode = coalesce(var.authentication_mode, "API_AND_CONFIG_MAP")
+    auth_mode     = coalesce(var.authentication_mode, "CONFIG_MAP")
   }
 
   provisioner "local-exec" {

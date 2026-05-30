@@ -514,6 +514,36 @@ In `API_AND_CONFIG_MAP`, **access entries are evaluated before aws-auth**. EKS o
 
 Re-run **apply** with `dev_eks_phase: nodes`. CI will remove the stale access entry, refresh aws-auth, and recycle instances.
 
+**Update (Issue 24):** Even with **no** access entry and correct `aws-auth`, join can still fail in `API_AND_CONFIG_MAP`. Dev now uses **`CONFIG_MAP`** only.
+
+---
+
+## Issue 24: aws-auth correct, no access entry, still Unauthorized (API_AND_CONFIG_MAP)
+
+**Symptoms**
+
+- `authMode`: `API_AND_CONFIG_MAP`
+- **No** EC2_LINUX access entry for the node role (expected)
+- `aws-auth` `mapRoles` correct (`system:bootstrappers`, `system:nodes`)
+- Node group `ACTIVE`, instances boot, nodeadm/kubelet start
+- Kubelet: `Unable to register node with API server: Unauthorized` for 30+ minutes
+
+**Cause**
+
+Managed node groups in **`API_AND_CONFIG_MAP`** do not reliably authenticate via `aws-auth` when EKS never created an access entry. Access entries take precedence over the ConfigMap; with no valid entry, nodes stay Unauthorized even when `mapRoles` is perfect.
+
+**Fix**
+
+| Change | File |
+|--------|------|
+| `authentication_mode = "CONFIG_MAP"` on cluster create | `environments/dev/main.tf` |
+| Recreate cluster when mode is `API` or `API_AND_CONFIG_MAP` | `recover_dev_cluster_if_api_mode` |
+| **Do not** upgrade CONFIG_MAP → API_AND_CONFIG_MAP in CI | `upgrade_eks_authentication_mode_if_needed`, `auth_mode.tf` |
+| Create node group at desired size (no scale-0 dance) | `modules/eks/node_groups.tf` |
+| Wait for Ready only after node group create | `wait-for-ready-nodes.sh` via `null_resource.node_group_scale_out` |
+
+Re-run **apply** with `dev_eks_phase: all` (or `cluster` then `nodes`). First apply deletes the `API_AND_CONFIG_MAP` cluster and recreates with `CONFIG_MAP` (~25–40 min).
+
 ---
 
 ## Issue 18: AssociateAccessPolicy fails on EC2_LINUX access entry
@@ -599,9 +629,9 @@ Re-run **apply** with `dev_eks_phase: nodes`; CI will reset the failed node grou
 
 **Fix**
 
-1. `authentication_mode = "API_AND_CONFIG_MAP"` on cluster create (`environments/dev/main.tf`)
+1. `authentication_mode = "CONFIG_MAP"` on cluster create (`environments/dev/main.tf`) — see Issue 24
 2. Stop migrating to API (`migrate-cluster-auth-to-api.sh` removed from CI)
-3. On **apply only**, `recover_dev_cluster_if_api_mode` deletes the API-mode cluster and clears `module.eks[0]` state
+3. On **apply only**, `recover_dev_cluster_if_api_mode` deletes non-CONFIG_MAP clusters and clears `module.eks[0]` state
 4. Same apply recreates the cluster and runs the aws-auth node join flow
 
 **Do not** import `aws_eks_access_entry` — that resource is not used.
@@ -666,6 +696,7 @@ Removed redundant Terraform SG rule resources; EKS-managed rules are sufficient.
 | Join / SG (not Unauthorized) | `modules/sg/main.tf` L71–105; EKS cluster SG rules (Issue 23) |
 | **Duplicate cluster SG rules** | Issue 23 — removed `cluster_security_group_rules.tf` |
 | **Kubelet Unauthorized (API mode)** | Issue 21 — recreate cluster; `recover_dev_cluster_if_api_mode` |
+| **Kubelet Unauthorized (API_AND_CONFIG_MAP + aws-auth OK)** | Issue 24 — recreate as CONFIG_MAP |
 | **Log group already exists** | Issue 22 — `import_eks_foundation_resources`, log group delete on recreate |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |

@@ -1,5 +1,6 @@
-# CONFIG_MAP clusters cannot use aws_eks_access_entry until authentication mode is upgraded in-place.
+# Skip in-place upgrade when the cluster is intended to stay on CONFIG_MAP (managed node groups + aws-auth).
 resource "null_resource" "ensure_eks_authentication_mode" {
+  count = coalesce(var.authentication_mode, "API_AND_CONFIG_MAP") != "CONFIG_MAP" ? 1 : 0
   triggers = {
     cluster_name = aws_eks_cluster.main.name
     region       = var.region
