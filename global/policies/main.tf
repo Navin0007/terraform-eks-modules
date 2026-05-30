@@ -24,6 +24,19 @@ data "aws_iam_policy_document" "eks_cluster" {
 
     resources = ["*"]
   }
+
+  # EKS authenticator resolves aws-auth username template system:node:{{EC2PrivateDNSName}}
+  # by calling ec2:DescribeInstances as the cluster IAM role (not the node role).
+  statement {
+    sid    = "AuthenticatorEC2PrivateDNS"
+    effect = "Allow"
+
+    actions = [
+      "ec2:DescribeInstances",
+    ]
+
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_policy" "eks_cluster" {

@@ -2116,6 +2116,14 @@ node_iam_role_arn() {
     --output text
 }
 
+cluster_iam_role_arn() {
+  local cluster_name="${1:-$(eks_cluster_name)}"
+  aws iam get-role \
+    --role-name "${cluster_name}-cluster" \
+    --query 'Role.Arn' \
+    --output text
+}
+
 ensure_node_cluster_auth_for_dev() {
   tf_export_dev_vars
   local cluster_name node_role_arn repo_root
@@ -2577,16 +2585,81 @@ diag_node_join_check_network() {
     && [ "${endpoints_ok}" = true ] || [ "${nat_ok}" = true ]
 }
 
+# CHECK 5 — cluster IAM role can ec2:DescribeInstances for aws-auth {{EC2PrivateDNSName}}.
+diag_node_join_check_cluster_role_ec2() {
+  local cluster_name="$1"
+  local cluster_role_arn role_name attached decision
+
+  cluster_role_arn="$(cluster_iam_role_arn "${cluster_name}" 2>/dev/null \
+    || echo "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${cluster_name}-cluster")"
+  role_name="${cluster_role_arn##*/}"
+
+  echo ""
+  echo "========== CHECK 5: Cluster role EC2 (authenticator {{EC2PrivateDNSName}}) =========="
+  echo "When a node authenticates, the EKS control plane resolves username"
+  echo "system:node:{{EC2PrivateDNSName}} by calling ec2:DescribeInstances as the"
+  echo "CLUSTER role (${cluster_role_arn}), not the node role."
+  echo "Without ec2:DescribeInstances on the cluster role, authenticator logs show:"
+  echo "  failed querying private DNS from EC2 API ... not authorized: ec2:DescribeInstances"
+
+  if ! aws iam get-role --role-name "${role_name}" &>/dev/null; then
+    echo "RESULT: FAIL — IAM role ${role_name} does not exist."
+    return 1
+  fi
+
+  echo "--- attached policies (cluster role) ---"
+  attached="$(aws iam list-attached-role-policies \
+    --role-name "${role_name}" \
+    --output text 2>/dev/null || true)"
+  if [ -n "${attached}" ]; then
+    printf '%s\n' "${attached}"
+  else
+    echo "(none or could not list)"
+  fi
+
+  decision="$(aws iam simulate-principal-policy \
+    --policy-source-arn "${cluster_role_arn}" \
+    --action-names ec2:DescribeInstances \
+    --resource-arns "*" \
+    --query 'EvaluationResults[0].EvalDecision' \
+    --output text 2>/dev/null || echo "unknown")"
+
+  echo "--- simulate ec2:DescribeInstances (cluster role) ---"
+  echo "EvalDecision=${decision}"
+  if [ "${decision}" = "allowed" ]; then
+    echo "RESULT: PASS — cluster role may call ec2:DescribeInstances."
+    return 0
+  fi
+
+  echo "RESULT: FAIL — cluster role cannot ec2:DescribeInstances."
+  echo "Fix: attach ec2:DescribeInstances to ${role_name} (global/policies eks_cluster policy)."
+  echo "Then terraform apply global/policies and re-run dev nodes phase."
+
+  local log_group="/aws/eks/${cluster_name}/cluster"
+  local start_ms
+  start_ms=$(( ($(date +%s) - 900) * 1000 ))
+  if aws logs filter-log-events \
+    --log-group-name "${log_group}" \
+    --region "${AWS_REGION}" \
+    --start-time "${start_ms}" \
+    --filter-pattern "DescribeInstances" \
+    --query 'events[-3:].message' \
+    --output text 2>/dev/null | grep -q "DescribeInstances"; then
+    echo "RESULT: FAIL — authenticator log confirms EC2 DescribeInstances denied for cluster role."
+  fi
+  return 1
+}
+
 # Print node join hints when a node group is CREATE_FAILED.
 diagnose_node_join_failure() {
   tf_export_dev_vars
   local cluster_name="${1:-$(eks_cluster_name)}"
   local nodegroup_name="${2:-general}"
   local node_role_arn auth_mode
-  local check1=0 check3=0 check4=0
+  local check1=0 check3=0 check4=0 check5=0
 
   echo "=== Node join diagnostics (${cluster_name}/${nodegroup_name}) ==="
-  echo "Four-pillar debug: (1) aws-auth  (2) who writes it  (3) IAM policies  (4) network"
+  echo "Five-pillar debug: (1) aws-auth  (2) who writes it  (3) node IAM  (4) network  (5) cluster role EC2"
 
   aws eks describe-cluster \
     --name "${cluster_name}" \
@@ -2605,6 +2678,7 @@ diagnose_node_join_failure() {
   diag_node_join_check_aws_auth_ownership "${cluster_name}" "${nodegroup_name}"
   diag_node_join_check_iam_policies "${node_role_arn}" && check3=1 || check3=0
   diag_node_join_check_network "${cluster_name}" "${nodegroup_name}" && check4=1 || check4=0
+  diag_node_join_check_cluster_role_ec2 "${cluster_name}" && check5=1 || check5=0
 
   echo ""
   echo "========== CHECK 1b: EKS access entry (API_AND_CONFIG_MAP) =========="
@@ -2665,6 +2739,25 @@ diagnose_node_join_failure() {
     --query 'events[-8:].message' \
     --output text 2>/dev/null \
     || echo "(no matching authenticator lines — check log group /aws/eks/${cluster_name}/cluster)"
+
+  echo "--- authenticator: cluster role EC2 / {{EC2PrivateDNSName}} errors (last 15 min) ---"
+  local auth_ec2_lines
+  auth_ec2_lines="$(aws logs filter-log-events \
+    --log-group-name "${log_group}" \
+    --region "${AWS_REGION}" \
+    --start-time "${start_ms}" \
+    --filter-pattern "DescribeInstances" \
+    --query 'events[-5:].message' \
+    --output text 2>/dev/null || true)"
+  if [ -n "${auth_ec2_lines}" ] && [ "${auth_ec2_lines}" != "None" ]; then
+    printf '%s\n' "${auth_ec2_lines}"
+    if printf '%s\n' "${auth_ec2_lines}" | grep -qE 'renderTemplates|private DNS|DescribeInstances'; then
+      echo "RESULT: FAIL — cluster role lacks ec2:DescribeInstances (see CHECK 5)."
+      check5=0
+    fi
+  else
+    echo "(no DescribeInstances / renderTemplates lines in last 15 min)"
+  fi
 
   aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
@@ -2745,6 +2838,7 @@ diagnose_node_join_failure() {
   echo "  CHECK 2 aws-auth ownership:     see CHECK 2 (EKS on node group create; CI repair fallback)"
   echo "  CHECK 3 node IAM policies:      $([ "${check3}" -eq 1 ] && echo PASS || echo FAIL — see CHECK 3 above)"
   echo "  CHECK 4 network path:           $([ "${check4}" -eq 1 ] && echo PASS/WARN || echo WARN — see CHECK 4 above)"
+  echo "  CHECK 5 cluster role EC2:       $([ "${check5}" -eq 1 ] && echo PASS || echo FAIL — ec2:DescribeInstances for {{EC2PrivateDNSName}})"
   echo "  Access entry + kubelet/instance: see sections below"
   echo ""
   echo "Copy this entire block from '=== Node join diagnostics' through this summary when asking for help."

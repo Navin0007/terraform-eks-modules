@@ -576,9 +576,9 @@ Re-run **apply** with `dev_eks_phase: nodes` (CI deletes `CREATE_FAILED` node gr
 
 ---
 
-## Node join: four-pillar debug (CI)
+## Node join: five-pillar debug (CI)
 
-On apply failure, the workflow runs `diagnose_node_join_failure` and prints **CHECK 1–4** plus a summary. Copy from `=== Node join diagnostics` through `DEBUG CHECKLIST SUMMARY`.
+On apply failure, the workflow runs `diagnose_node_join_failure` and prints **CHECK 1–5** plus a summary. Copy from `=== Node join diagnostics` through `DEBUG CHECKLIST SUMMARY`.
 
 | Check | Question | PASS means |
 |-------|----------|------------|
@@ -586,8 +586,49 @@ On apply failure, the workflow runs `diagnose_node_join_failure` and prints **CH
 | **2** | Who writes **aws-auth**? | EKS on managed node group create; CI repair only as fallback (`prepare-managed-node-aws-auth.sh`) |
 | **3** | Does the node IAM role have **WorkerNode + CNI + ECR** policies? | Node can bootstrap, run CNI, pull images |
 | **4** | Can nodes reach the **API** (private endpoint, NAT/VPC endpoints, cluster SG)? | Network path to control plane exists |
+| **5** | Can the **cluster IAM role** call `ec2:DescribeInstances`? | Authenticator can resolve `system:node:{{EC2PrivateDNSName}}` in aws-auth |
 
-Also printed: EKS access entry (1b), authenticator logs, instance IAM profile, kubelet journal.
+Also printed: EKS access entry (1b), authenticator logs (including EC2 / `renderTemplates` errors), instance IAM profile, kubelet journal.
+
+---
+
+## Issue 26: CHECK 1–4 PASS but kubelet Unauthorized — cluster role lacks ec2:DescribeInstances
+
+**Symptoms**
+
+- Node group `CREATE_FAILED`: `Instances failed to join the kubernetes cluster`
+- Kubelet: `Unable to register node with API server` / `Unauthorized`
+- CHECK 1 (aws-auth), 3 (node IAM), 4 (network) all **PASS**
+- Authenticator log:
+
+  ```
+  access denied ... error="mapper DynamicFile renderTemplates error: error rendering username template \"system:node:{{EC2PrivateDNSName}}\": failed querying private DNS from EC2 API for node i-...: ... not authorized to perform: ec2:DescribeInstances. User: assumed-role/my-project-dev-eks-cluster/..."
+  ```
+
+**Cause**
+
+The EKS authenticator resolves the `{{EC2PrivateDNSName}}` placeholder in aws-auth **at authentication time** by calling **EC2 DescribeInstances** using the **cluster IAM role** (`*-eks-cluster`), not the node role. If that role lacks `ec2:DescribeInstances`, authentication fails even when aws-auth mapRoles is correct.
+
+**Fix**
+
+| Change | File |
+|--------|------|
+| Add `ec2:DescribeInstances` to eks cluster IAM policy | `global/policies/main.tf` (`eks_cluster` policy document) |
+| CHECK 5 in CI diagnostics | `.github/scripts/terraform-common.sh` `diag_node_join_check_cluster_role_ec2` |
+
+1. `terraform apply` in `global/policies` (updates `my-project-dev-eks-cluster` policy attachment).
+2. Re-run dev apply with `dev_eks_phase: nodes` (CI deletes failed node group and recreates).
+
+**Verify**
+
+```bash
+aws iam simulate-principal-policy \
+  --policy-source-arn "arn:aws:iam::ACCOUNT:role/my-project-dev-eks-cluster" \
+  --action-names ec2:DescribeInstances \
+  --resource-arns "*" \
+  --query 'EvaluationResults[0].EvalDecision'
+# expected: allowed
+```
 
 ---
 
@@ -742,6 +783,7 @@ Removed redundant Terraform SG rule resources; EKS-managed rules are sufficient.
 | **Duplicate cluster SG rules** | Issue 23 — removed `cluster_security_group_rules.tf` |
 | **Kubelet Unauthorized (API mode)** | Issue 21 — recreate cluster; `recover_dev_cluster_if_api_mode` |
 | **Kubelet Unauthorized (API_AND_CONFIG_MAP + aws-auth OK)** | Issue 24 — recreate as CONFIG_MAP |
+| **CHECK 1–4 PASS, authenticator DescribeInstances 403** | Issue 26 — cluster role needs `ec2:DescribeInstances` |
 | **Log group already exists** | Issue 22 — `import_eks_foundation_resources`, log group delete on recreate |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
