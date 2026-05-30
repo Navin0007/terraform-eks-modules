@@ -2316,7 +2316,7 @@ diagnose_node_join_failure() {
   else
     if [ "${auth_mode}" = "API" ]; then
       echo "::error::Node access entry missing — API mode requires EC2_LINUX entry for the node role."
-    el    if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
+    elif [ "${auth_mode}" = "API_AND_CONFIG_MAP" ]; then
       echo "(no access entry — EKS should create EC2_LINUX entry when the managed node group is created)"
     else
       echo "(no access entry for node role — OK for CONFIG_MAP + aws-auth only)"
