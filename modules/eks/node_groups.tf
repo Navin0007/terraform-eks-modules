@@ -40,12 +40,11 @@ resource "aws_eks_node_group" "main" {
   depends_on = [
     aws_eks_cluster.main,
     aws_eks_addon.vpc_cni,
-    null_resource.aws_auth_node_role[0],
   ]
 }
 
 resource "null_resource" "node_group_scale_out" {
-  for_each = var.manage_aws_auth_configmap && var.enable_node_groups ? var.node_groups : {}
+  for_each = var.enable_node_groups ? var.node_groups : {}
 
   triggers = {
     node_group_id = aws_eks_node_group.main[each.key].id
@@ -54,7 +53,7 @@ resource "null_resource" "node_group_scale_out" {
   }
 
   provisioner "local-exec" {
-    command = "bash ${path.module}/scripts/wait-for-ready-nodes.sh"
+    command = "bash ${path.module}/scripts/wait-for-managed-node-join.sh"
     environment = {
       CLUSTER_NAME   = aws_eks_cluster.main.name
       NODEGROUP_NAME = each.key

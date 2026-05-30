@@ -1,2 +1,2 @@
-# Managed node groups: do not create EC2_LINUX access entries in Terraform or CI.
-# CONFIG_MAP managed nodes join via aws-auth mapRoles (see prepare-managed-node-aws-auth.sh).
+# Managed node groups: EKS creates EC2_LINUX access entry + aws-auth on node group create.
+# Do not pre-create access entries or pre-merge aws-auth in Terraform (see aws_auth.tf).

@@ -92,9 +92,8 @@ module "eks" {
   enable_node_groups = local.eks_nodes_enabled
   node_groups        = local.eks_nodes_enabled ? var.node_groups : {}
 
-  # Managed node groups join via aws-auth mapRoles. CONFIG_MAP is required (API_AND_CONFIG_MAP
-  # does not reliably authenticate managed nodes without a valid EKS-created access entry).
-  authentication_mode      = "CONFIG_MAP"
+  # Managed nodes need API_AND_CONFIG_MAP with BOTH EKS access entry + aws-auth mapRoles.
+  authentication_mode      = "API_AND_CONFIG_MAP"
   create_node_access_entry = false
 
   endpoint_private_access = true

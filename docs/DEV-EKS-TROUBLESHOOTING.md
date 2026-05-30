@@ -544,6 +544,36 @@ Managed node groups in **`API_AND_CONFIG_MAP`** do not reliably authenticate via
 
 Re-run **apply** with `dev_eks_phase: all` (or `cluster` then `nodes`). First apply deletes the `API_AND_CONFIG_MAP` cluster and recreates with `CONFIG_MAP` (~25–40 min).
 
+**Update (Issue 25):** CONFIG_MAP with pre-merged aws-auth still failed. Dev uses **API_AND_CONFIG_MAP** with **both** EKS access entry and aws-auth; upgrade CONFIG_MAP clusters in-place (no full recreate).
+
+---
+
+## Issue 25: CONFIG_MAP + aws-auth correct but still Unauthorized
+
+**Symptoms**
+
+- `authMode`: `CONFIG_MAP`
+- `aws-auth` `mapRoles` correct
+- No access entry (expected for CONFIG_MAP)
+- Kubelet `Unauthorized`; node group `CREATE_FAILED`
+
+**Cause**
+
+1. **Pre-merging aws-auth before `aws_eks_node_group`** can prevent EKS from wiring managed node auth on node group create.
+2. On current EKS versions, **API_AND_CONFIG_MAP managed nodes need both** an EKS **EC2_LINUX access entry** and **aws-auth mapRoles** (access entry alone → authenticator `Identity is not mapped`).
+
+**Fix**
+
+| Change | File |
+|--------|------|
+| `authentication_mode = "API_AND_CONFIG_MAP"` | `environments/dev/main.tf` |
+| Upgrade CONFIG_MAP → API_AND_CONFIG_MAP in-place | `recover_dev_cluster_if_api_mode`, `upgrade-eks-authentication-mode.sh` |
+| Remove pre-nodegroup aws-auth `null_resource` | `modules/eks/aws_auth.tf` |
+| Never delete EKS access entries in CI | `prepare-managed-node-aws-auth.sh` |
+| Let EKS create entry + aws-auth on NG create; verify after | `wait-for-managed-node-join.sh` |
+
+Re-run **apply** with `dev_eks_phase: nodes` (CI deletes `CREATE_FAILED` node group, upgrades auth mode, recreates node group).
+
 ---
 
 ## Issue 18: AssociateAccessPolicy fails on EC2_LINUX access entry

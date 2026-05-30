@@ -19,11 +19,6 @@ wait_for_ready_nodes() {
   aws eks update-kubeconfig --name "${cluster_name}" --region "${region}" >/dev/null
 
   for attempt in $(seq 1 45); do
-    if [ "${auth_mode}" = "API_AND_CONFIG_MAP" ] || [ "${auth_mode}" = "CONFIG_MAP" ]; then
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-        python3 "${script_dir}/merge-aws-auth-maproles.py" 2>/dev/null || true
-    fi
-
     ready="$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready" { n++ } END { print n + 0 }')"
     total="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
 
