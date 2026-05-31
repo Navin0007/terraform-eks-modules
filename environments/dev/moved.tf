@@ -1,4 +1,5 @@
 # State migration after restructuring provisioning stages.
+# One moved block per destination — vpc-cni was in module.eks; kube-proxy was in module.addons.
 
 moved {
   from = module.eks[0].aws_eks_addon.vpc_cni
@@ -6,17 +7,7 @@ moved {
 }
 
 moved {
-  from = module.eks[0].aws_eks_addon.vpc_cni[0]
-  to   = aws_eks_addon.vpc_cni[0]
-}
-
-moved {
   from = module.addons[0].aws_eks_addon.kube_proxy
-  to   = aws_eks_addon.kube_proxy[0]
-}
-
-moved {
-  from = module.eks[0].aws_eks_addon.kube_proxy[0]
   to   = aws_eks_addon.kube_proxy[0]
 }
 
