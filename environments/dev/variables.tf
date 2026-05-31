@@ -131,11 +131,6 @@ variable "irsa_roles" {
       service_account = "aws-node"
       policy_arns     = ["arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"]
     }
-    kube-proxy = {
-      namespace       = "kube-system"
-      service_account = "kube-proxy"
-      policy_arns     = []
-    }
     ebs-csi = {
       namespace       = "kube-system"
       service_account = "ebs-csi-controller-sa"

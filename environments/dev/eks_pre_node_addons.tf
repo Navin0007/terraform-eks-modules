@@ -23,7 +23,6 @@ resource "aws_eks_addon" "kube_proxy" {
 
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  service_account_role_arn    = module.iam_irsa[0].irsa_role_arns["kube-proxy"]
 
   timeouts {
     create = "45m"

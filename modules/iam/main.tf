@@ -41,6 +41,13 @@ resource "aws_iam_role_policy_attachment" "cluster_custom" {
   policy_arn = var.eks_cluster_policy_arn
 }
 
+resource "aws_iam_role_policy_attachment" "cluster_aws_managed" {
+  count = var.create_core_roles ? 1 : 0
+
+  role       = aws_iam_role.cluster[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
 resource "aws_iam_role_policy_attachment" "cluster_vpc_resource_controller" {
   count = var.create_core_roles ? 1 : 0
 

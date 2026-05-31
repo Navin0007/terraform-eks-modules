@@ -19,9 +19,31 @@ variable "cluster_id" {
 }
 
 variable "nodes_ready_dependency" {
-  description = "EKS module nodes_joined output; post-node add-ons wait until nodes are Ready and CCM-initialized."
+  description = "EKS node groups nodes_joined output; post-node add-ons wait until nodes are Ready."
   type        = string
   default     = ""
+}
+
+variable "node_role_arn" {
+  description = "EKS node IAM role ARN (used by the CCM readiness check)."
+  type        = string
+}
+
+variable "region" {
+  description = "AWS region for kubectl and EKS API calls during CCM wait."
+  type        = string
+}
+
+variable "nodegroup_name" {
+  description = "Managed node group name checked during CCM wait."
+  type        = string
+  default     = "general"
+}
+
+variable "node_desired_size" {
+  description = "Expected Ready node count for CCM initialization."
+  type        = number
+  default     = 1
 }
 
 variable "cluster_version" {

@@ -35,8 +35,9 @@ wait_for_managed_node_join() {
     fi
   fi
 
+  # Ready is enough for stage 5; CCM init is gated before post-node add-ons (stage 6).
   CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-    NODEGROUP_NAME="${nodegroup_name}" DESIRED_SIZE="${desired_size}" REQUIRE_CCM_INIT=true \
+    NODEGROUP_NAME="${nodegroup_name}" DESIRED_SIZE="${desired_size}" REQUIRE_CCM_INIT=false \
     bash "${script_dir}/wait-for-ready-nodes.sh"
 }
 

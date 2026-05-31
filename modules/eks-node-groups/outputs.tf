@@ -13,6 +13,6 @@ output "node_group_arns" {
 }
 
 output "nodes_joined" {
-  description = "Set after node group scale-out, Ready nodes, and CCM initialization (gates post-node add-ons)."
+  description = "Set after node group scale-out and Ready node verification (gates CCM wait and post-node add-ons)."
   value       = join(",", [for _, r in null_resource.node_group_scale_out : r.id])
 }

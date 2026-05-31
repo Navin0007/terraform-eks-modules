@@ -36,5 +36,6 @@ resource "aws_eks_addon" "aws_ebs_csi_driver" {
     terraform_data.cluster_dependency,
     data.aws_eks_cluster.main,
     terraform_data.nodes_ready,
+    null_resource.ccm_initialized,
   ]
 }

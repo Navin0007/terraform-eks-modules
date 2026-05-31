@@ -17,5 +17,6 @@ resource "aws_eks_addon" "coredns" {
     terraform_data.cluster_dependency,
     data.aws_eks_cluster.main,
     terraform_data.nodes_ready,
+    null_resource.ccm_initialized,
   ]
 }

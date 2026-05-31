@@ -161,6 +161,10 @@ module "addons" {
   cluster_version        = module.eks[0].cluster_version
   ebs_csi_role_arn       = module.iam_irsa[0].irsa_role_arns["ebs-csi"]
   nodes_ready_dependency = module.eks_node_groups[0].nodes_joined
+  node_role_arn          = module.iam.node_role_arn
+  region                 = var.region
+  nodegroup_name         = "general"
+  node_desired_size      = var.node_groups["general"].desired_size
   tags                   = local.common_tags
 
   depends_on = [

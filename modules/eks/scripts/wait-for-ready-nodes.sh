@@ -41,6 +41,7 @@ wait_for_ready_nodes() {
   local region="${AWS_REGION:?}"
   local desired_size="${DESIRED_SIZE:-1}"
   local require_ccm_init="${REQUIRE_CCM_INIT:-true}"
+  local max_attempts="${MAX_WAIT_ATTEMPTS:-45}"
   local script_dir attempt ready total ccm_ready
 
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,15 +54,15 @@ wait_for_ready_nodes() {
 
   aws eks update-kubeconfig --name "${cluster_name}" --region "${region}" >/dev/null
 
-  for attempt in $(seq 1 45); do
+  for attempt in $(seq 1 "${max_attempts}"); do
     ready="$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready" { n++ } END { print n + 0 }')"
     total="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
     ccm_ready="$(count_ccm_initialized_nodes "${desired_size}")"
 
     if [ "${require_ccm_init}" = "true" ]; then
-      echo "Node join check ${attempt}/45: Ready=${ready}/${total} (want >= ${desired_size}), CCM-initialized=${ccm_ready}/${desired_size}"
+      echo "Node join check ${attempt}/${max_attempts}: Ready=${ready}/${total} (want >= ${desired_size}), CCM-initialized=${ccm_ready}/${desired_size}"
     else
-      echo "Node join check ${attempt}/45: Ready=${ready}/${total} (want >= ${desired_size})"
+      echo "Node join check ${attempt}/${max_attempts}: Ready=${ready}/${total} (want >= ${desired_size})"
     fi
 
     aws eks describe-nodegroup \
