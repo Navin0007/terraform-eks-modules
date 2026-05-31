@@ -741,6 +741,28 @@ Add-on install is gated on CCM init complete (no `uninitialized` taint + `topolo
 
 `addons-only` destroy runs `dev_destroy_addons_only`: `enable_addons=false` apply removes `module.addons` only; cluster, nodes, IRSA, and VPC stay.
 
+---
+
+## Issue 29: Apply with dev_eks_phase `nodes` destroyed add-ons / IRSA
+
+**Symptoms**
+
+- Plan shows `module.addons[0]` and `module.iam_irsa[0]` **destroy** when you only wanted to update the node group (e.g. launch template / hop limit).
+- kube-proxy, CoreDNS, EBS CSI, and IRSA roles removed from AWS.
+
+**Cause**
+
+Before state preservation, `dev_eks_phase: nodes` set `enable_irsa=false` and `enable_addons=false`, so Terraform removed higher-phase modules.
+
+**Fix (code)**
+
+CI now calls `preserve_deployed_eks_phases_from_state` on apply: if `module.iam_irsa` or `module.addons` exist in state, those flags stay enabled.
+
+**Recovery (if already destroyed)**
+
+1. **apply** → `dev_eks_phase: irsa`
+2. **apply** → `dev_eks_phase: addons`
+
 **If a full destroy failed mid-way**
 
 1. Check what still exists: `aws eks describe-cluster --name my-project-dev-eks`, `kubectl get nodes`
@@ -904,6 +926,7 @@ Removed redundant Terraform SG rule resources; EKS-managed rules are sufficient.
 | **Nodes Ready, add-ons Pending (`uninitialized` taint)** | Issue 27 — CCM init incomplete; rollout restart or recycle nodes |
 | **EBS CSI node CrashLoop, no topology labels** | Issue 27 — same; wait for labels or restart after CCM init |
 | **Destroy addons tried to delete VPC** | Issue 28 — use `dev_eks_phase: addons-only`, not `addons` |
+| **Apply `nodes` destroyed add-ons / IRSA** | Issue 29 — re-apply `irsa` then `addons`; fixed by state preservation |
 | **Log group already exists** | Issue 22 — `import_eks_foundation_resources`, log group delete on recreate |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |

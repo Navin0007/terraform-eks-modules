@@ -30,7 +30,17 @@ resource "aws_launch_template" "node_group" {
     resource_type = "instance"
 
     tags = merge(local.common_tags, {
-      Name = "${local.cluster_name}-${each.key}"
+      Name                                          = "${local.cluster_name}-${each.key}"
+      "kubernetes.io/cluster/${local.cluster_name}" = "owned"
+    })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+
+    tags = merge(local.common_tags, {
+      Name                                          = "${local.cluster_name}-${each.key}"
+      "kubernetes.io/cluster/${local.cluster_name}" = "owned"
     })
   }
 

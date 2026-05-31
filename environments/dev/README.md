@@ -90,10 +90,13 @@ Shortcut: `enable_eks = true` enables all four phases in one apply.
 
 **GitHub Actions:** **target** `environments/dev` (or `all`), set **dev_eks_phase** to `none` → `cluster` → `nodes` → `irsa` → `addons` (or `all` once). Each choice turns on the cumulative flags automatically.
 
+**Apply is additive:** re-running a lower phase (e.g. `nodes` to roll the node group) does **not** destroy IRSA or add-ons already in Terraform state. Destroy still respects the selected phase (use `addons-only` to remove add-ons only).
+
 **Destroy add-ons only (keep cluster, nodes, VPC):** use **dev_eks_phase: `addons-only`** + **operation: destroy**. Do **not** use `addons` for destroy — that removes the entire dev stack including VPC.
 
 | Operation | dev_eks_phase | Effect |
 |-----------|---------------|--------|
+| apply | `nodes` | Node group only; keeps IRSA/add-ons if already deployed |
 | apply | `addons` or `addons-only` | Create IRSA + add-ons |
 | destroy | **`addons-only`** | Remove add-ons only (`enable_addons=false` apply) |
 | destroy | `addons` | **Full dev stack destroy** (cluster, nodes, VPC, …) |

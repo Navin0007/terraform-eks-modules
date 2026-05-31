@@ -115,6 +115,41 @@ apply_dev_eks_phase_from_input() {
   echo "Dev EKS phase: ${phase} → cluster=${TF_VAR_enable_eks_cluster} nodes=${TF_VAR_enable_eks_nodes} irsa=${TF_VAR_enable_irsa} addons=${TF_VAR_enable_addons} (enable_eks=${TF_VAR_enable_eks})"
 }
 
+# Apply is additive: do not tear down IRSA/add-ons already in state when re-running a lower dev_eks_phase.
+preserve_deployed_eks_phases_from_state() {
+  local dev_abs="${1:-environments/dev}"
+  local did_pushd=false
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+
+  if [ "${TF_OPERATION:-apply}" = "destroy" ]; then
+    return 0
+  fi
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  if ! terraform state list -no-color 2>/dev/null | grep -qE '^module\.iam_irsa\[0\]\.'; then
+    :
+  elif ! _tf_bool_is_true "${TF_VAR_enable_irsa:-false}"; then
+    export TF_VAR_enable_irsa=true
+    echo "Preserving deployed IRSA (module.iam_irsa present in state; nodes-only apply will not destroy it)."
+  fi
+
+  if ! terraform state list -no-color 2>/dev/null | grep -qE '^module\.addons\[0\]\.'; then
+    :
+  elif ! _tf_bool_is_true "${TF_VAR_enable_addons:-false}"; then
+    export TF_VAR_enable_addons=true
+    echo "Preserving deployed add-ons (module.addons present in state; lower-phase apply will not destroy them)."
+  fi
+
+  if [ "${did_pushd}" = true ]; then
+    popd >/dev/null
+  fi
+}
+
 dev_stack_enable_eks_cluster() {
   _tf_bool_is_true "${TF_VAR_enable_eks:-false}" && return 0
   _tf_bool_is_true "${TF_VAR_enable_eks_cluster:-false}" && return 0
@@ -3380,6 +3415,7 @@ dev_stack_prepare() {
   local dev_abs="${1:-environments/dev}"
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_init_s3_backend "${dev_abs}" dev/terraform.tfstate
+  preserve_deployed_eks_phases_from_state "${dev_abs}"
 
   if ! dev_stack_enable_eks_cluster; then
     echo "EKS phases off; provisioning VPC, IAM roles, and security groups only."
