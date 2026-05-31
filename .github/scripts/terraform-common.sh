@@ -191,6 +191,62 @@ dev_stack_enable_eks_nodes() {
   return 1
 }
 
+# kube-proxy must not use IRSA. UpdateAddon cannot clear serviceAccountRoleArn (403 Cross-account pass role).
+recreate_kube_proxy_without_irsa_if_needed() {
+  local dev_abs="${1:-environments/dev}"
+  local cluster_name role_arn did_pushd=false
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+  cluster_name="$(eks_cluster_name)"
+
+  if [ "${TF_OPERATION:-apply}" = "destroy" ]; then
+    return 0
+  fi
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    return 0
+  fi
+
+  if ! aws eks describe-addon \
+    --cluster-name "${cluster_name}" \
+    --addon-name kube-proxy \
+    --region "${AWS_REGION}" &>/dev/null; then
+    return 0
+  fi
+
+  role_arn="$(aws eks describe-addon \
+    --cluster-name "${cluster_name}" \
+    --addon-name kube-proxy \
+    --region "${AWS_REGION}" \
+    --query 'addon.serviceAccountRoleArn' \
+    --output text 2>/dev/null || echo "None")"
+
+  if [ -z "${role_arn}" ] || [ "${role_arn}" = "None" ]; then
+    return 0
+  fi
+
+  echo "kube-proxy has serviceAccountRoleArn=${role_arn}; deleting add-on so Terraform can recreate without IRSA..."
+  aws eks delete-addon \
+    --cluster-name "${cluster_name}" \
+    --addon-name kube-proxy \
+    --region "${AWS_REGION}"
+
+  aws eks wait addon-deleted \
+    --cluster-name "${cluster_name}" \
+    --addon-name kube-proxy \
+    --region "${AWS_REGION}" 2>/dev/null || true
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  terraform state rm -no-color 'aws_eks_addon.kube_proxy[0]' 2>/dev/null || true
+
+  [ "${did_pushd}" = true ] && popd >/dev/null
+}
+
 # Any EKS phase beyond foundation (VPC/IAM/SG).
 dev_stack_enable_eks() {
   dev_stack_enable_eks_cluster
@@ -3476,6 +3532,10 @@ dev_stack_prepare() {
   if ! dev_stack_enable_eks_cluster; then
     echo "EKS phases off; provisioning VPC, IAM roles, and security groups only."
     return 0
+  fi
+
+  if dev_stack_enable_pre_node_addons; then
+    recreate_kube_proxy_without_irsa_if_needed "${dev_abs}"
   fi
 
   if ! dev_stack_enable_eks_nodes; then
