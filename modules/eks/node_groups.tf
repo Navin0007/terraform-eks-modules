@@ -9,7 +9,11 @@ resource "aws_eks_node_group" "main" {
   ami_type       = each.value.ami_type
   capacity_type  = each.value.capacity_type
   instance_types = each.value.instance_types
-  disk_size      = each.value.disk_size_gb
+
+  launch_template {
+    id      = aws_launch_template.node_group[each.key].id
+    version = aws_launch_template.node_group[each.key].latest_version
+  }
 
   labels = each.value.labels
 

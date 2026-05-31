@@ -2397,6 +2397,38 @@ repair_dev_node_join_if_needed() {
   ready="$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready" { n++ } END { print n + 0 }')"
 
   if [ "${ready}" -ge "${desired}" ] && [ "${ready}" -gt 0 ]; then
+    if dev_stack_enable_addons; then
+      ccm_ready="$(kubectl get nodes -o json 2>/dev/null | python3 -c "
+import json, sys
+desired = int('${desired}')
+data = json.load(sys.stdin)
+ready = 0
+for node in data.get('items', []):
+    conditions = {c['type']: c['status'] for c in node.get('status', {}).get('conditions', [])}
+    if conditions.get('Ready') != 'True':
+        continue
+    taints = node.get('spec', {}).get('taints') or []
+    if any(t.get('key') == 'node.cloudprovider.kubernetes.io/uninitialized' for t in taints):
+        continue
+    labels = node.get('metadata', {}).get('labels', {})
+    if not labels.get('topology.kubernetes.io/zone') or not labels.get('node.kubernetes.io/instance-type'):
+        continue
+    ready += 1
+print(ready)
+" 2>/dev/null || echo "0")"
+      if [ "${ccm_ready}" -ge "${desired}" ]; then
+        echo "Node join OK: Ready=${ready}/${desired}, CCM-initialized=${ccm_ready}/${desired}."
+        return 0
+      fi
+      echo "Nodes Ready but CCM init incomplete (${ccm_ready}/${desired}); waiting before add-ons..."
+      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+        NODEGROUP_NAME="${nodegroup_name}" DESIRED_SIZE="${desired}" REQUIRE_CCM_INIT=true \
+        bash "${repo_root}/modules/eks/scripts/wait-for-ready-nodes.sh" || {
+          echo "::warning::CCM init wait timed out before add-ons apply; continuing."
+          return 0
+        }
+      return 0
+    fi
     echo "Node join OK: Ready=${ready}/${desired}."
     return 0
   fi
@@ -2884,9 +2916,11 @@ diagnose_node_join_failure() {
     --output text 2>/dev/null || true)"
   if [ -n "${auth_ec2_lines}" ] && [ "${auth_ec2_lines}" != "None" ]; then
     printf '%s\n' "${auth_ec2_lines}"
-    if printf '%s\n' "${auth_ec2_lines}" | grep -qE 'renderTemplates|private DNS|DescribeInstances'; then
-      echo "RESULT: FAIL — cluster role lacks ec2:DescribeInstances (see CHECK 5)."
+    if printf '%s\n' "${auth_ec2_lines}" | grep -qiE 'not authorized|UnauthorizedOperation|access denied|failed querying private DNS'; then
+      echo "RESULT: FAIL — authenticator denied ec2:DescribeInstances for cluster role (see CHECK 5)."
       check5=0
+    elif [ "${check5}" -eq 1 ] && printf '%s\n' "${auth_ec2_lines}" | grep -q 'Calling ec2:DescribeInstances'; then
+      echo "RESULT: INFO — authenticator invoked ec2:DescribeInstances (expected when simulate=allowed)."
     fi
   else
     echo "(no DescribeInstances / renderTemplates lines in last 15 min)"

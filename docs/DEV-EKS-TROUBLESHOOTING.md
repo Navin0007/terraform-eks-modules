@@ -713,9 +713,9 @@ kubectl get ds -n kube-system         # ebs-csi-node 2/2 READY
 kubectl get pods -n kube-system --field-selector=status.phase=Pending   # none
 ```
 
-**Prevent (future improvement)**
+**Prevent**
 
-Gate add-on install on CCM init complete (no `uninitialized` taint + topology labels), not just Ready node count — see `modules/eks/scripts/wait-for-ready-nodes.sh`.
+Add-on install is gated on CCM init complete (no `uninitialized` taint + `topology.kubernetes.io/zone` and `node.kubernetes.io/instance-type` labels), not just Ready node count — see `modules/eks/scripts/wait-for-ready-nodes.sh` and launch templates with `http_put_response_hop_limit = 2` in `modules/eks/launch_templates.tf` (required for EBS CSI IMDS from pods).
 
 ---
 
@@ -903,6 +903,7 @@ Removed redundant Terraform SG rule resources; EKS-managed rules are sufficient.
 | **CHECK 1–4 PASS, authenticator DescribeInstances 403** | Issue 26 — cluster role needs `ec2:DescribeInstances` |
 | **Nodes Ready, add-ons Pending (`uninitialized` taint)** | Issue 27 — CCM init incomplete; rollout restart or recycle nodes |
 | **EBS CSI node CrashLoop, no topology labels** | Issue 27 — same; wait for labels or restart after CCM init |
+| **Destroy addons tried to delete VPC** | Issue 28 — use `dev_eks_phase: addons-only`, not `addons` |
 | **Log group already exists** | Issue 22 — `import_eks_foundation_resources`, log group delete on recreate |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
