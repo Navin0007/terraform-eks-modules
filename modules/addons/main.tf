@@ -15,28 +15,7 @@ data "aws_eks_cluster" "main" {
   }
 }
 
-resource "aws_eks_addon" "kube_proxy" {
-  cluster_name = var.cluster_name
-  addon_name   = "kube-proxy"
-
-  addon_version               = local.addon_versions.kube_proxy
-  resolve_conflicts_on_create = var.resolve_conflicts_on_create
-  resolve_conflicts_on_update = var.resolve_conflicts_on_update
-
-  tags = local.common_tags
-
-  timeouts {
-    create = "45m"
-    update = "45m"
-  }
-
-  depends_on = [
-    terraform_data.cluster_dependency,
-    data.aws_eks_cluster.main,
-    terraform_data.nodes_ready,
-  ]
-}
-
+# Stage 6 — post-node add-ons (CoreDNS, EBS CSI) after nodes are Ready and CCM-initialized.
 resource "aws_eks_addon" "aws_ebs_csi_driver" {
   cluster_name = var.cluster_name
   addon_name   = "aws-ebs-csi-driver"
@@ -57,6 +36,5 @@ resource "aws_eks_addon" "aws_ebs_csi_driver" {
     terraform_data.cluster_dependency,
     data.aws_eks_cluster.main,
     terraform_data.nodes_ready,
-    aws_eks_addon.kube_proxy,
   ]
 }

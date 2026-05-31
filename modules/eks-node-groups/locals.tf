@@ -8,9 +8,8 @@ locals {
     },
     var.tags,
   )
+}
 
-  addon_versions = {
-    coredns            = lookup(var.addon_versions, "coredns", null)
-    aws_ebs_csi_driver = lookup(var.addon_versions, "aws-ebs-csi-driver", null)
-  }
+data "aws_eks_cluster" "main" {
+  name = var.cluster_name
 }

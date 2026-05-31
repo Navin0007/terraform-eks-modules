@@ -27,25 +27,31 @@ variable "enable_eks" {
 }
 
 variable "enable_eks_cluster" {
-  description = "Phase 1 — EKS control plane, OIDC provider, CloudWatch logs, and vpc-cni add-on."
-  type        = bool
-  default     = false
-}
-
-variable "enable_eks_nodes" {
-  description = "Phase 2 — managed node groups and node authentication (requires enable_eks_cluster)."
+  description = "Stage 3 — EKS control plane, OIDC provider, and CloudWatch logs."
   type        = bool
   default     = false
 }
 
 variable "enable_irsa" {
-  description = "Phase 3 — IRSA roles for vpc-cni and ebs-csi (requires cluster/OIDC from phase 1)."
+  description = "Stage 2 (identity) — IRSA roles for vpc-cni, kube-proxy, and ebs-csi (requires control plane/OIDC)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_pre_node_addons" {
+  description = "Stage 4 — vpc-cni (with IRSA) and kube-proxy add-ons before node groups (requires IRSA)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_eks_nodes" {
+  description = "Stage 5 — managed node groups, launch templates, and CCM initialization wait (requires pre-node add-ons)."
   type        = bool
   default     = false
 }
 
 variable "enable_addons" {
-  description = "Phase 4 — kube-proxy, CoreDNS, and EBS CSI add-ons (requires nodes and IRSA)."
+  description = "Stage 6 — post-node add-ons: CoreDNS, EBS CSI, and other workload add-ons (requires nodes)."
   type        = bool
   default     = false
 }
@@ -124,6 +130,11 @@ variable "irsa_roles" {
       namespace       = "kube-system"
       service_account = "aws-node"
       policy_arns     = ["arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"]
+    }
+    kube-proxy = {
+      namespace       = "kube-system"
+      service_account = "kube-proxy"
+      policy_arns     = []
     }
     ebs-csi = {
       namespace       = "kube-system"

@@ -19,7 +19,7 @@ variable "cluster_id" {
 }
 
 variable "nodes_ready_dependency" {
-  description = "EKS module nodes_joined output; add-ons wait until nodes are Ready before install."
+  description = "EKS module nodes_joined output; post-node add-ons wait until nodes are Ready and CCM-initialized."
   type        = string
   default     = ""
 }
@@ -27,17 +27,6 @@ variable "nodes_ready_dependency" {
 variable "cluster_version" {
   description = "Kubernetes version running on the EKS control plane from the EKS module output."
   type        = string
-}
-
-variable "vpc_cni_role_arn" {
-  description = "IRSA role ARN for the vpc-cni add-on from the IAM module irsa_role_arns map."
-  type        = string
-}
-
-variable "install_vpc_cni_addon" {
-  description = "Create the vpc-cni add-on in this module. Set false when module.eks already installed vpc-cni before node groups."
-  type        = bool
-  default     = true
 }
 
 variable "ebs_csi_role_arn" {

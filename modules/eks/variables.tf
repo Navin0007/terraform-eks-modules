@@ -64,18 +64,8 @@ variable "cluster_role_arn" {
   type        = string
 }
 
-variable "node_role_arn" {
-  description = "ARN of the EKS node IAM role from the IAM module."
-  type        = string
-}
-
 variable "control_plane_sg_id" {
   description = "Security group ID for the EKS control plane from the SG module."
-  type        = string
-}
-
-variable "node_sg_id" {
-  description = "Security group ID for EKS worker nodes from the SG module."
   type        = string
 }
 
@@ -112,76 +102,6 @@ variable "public_access_cidrs" {
   description = "CIDR blocks allowed to access the public Kubernetes API endpoint when endpoint_public_access is true."
   type        = list(string)
   default     = ["0.0.0.0/0"]
-}
-
-variable "manage_aws_auth_configmap" {
-  description = "Merge the node IAM role into kube-system/aws-auth mapRoles (required for managed node groups)."
-  type        = bool
-  default     = true
-
-  validation {
-    condition     = !var.enable_node_groups || length(var.node_groups) == 0 || var.manage_aws_auth_configmap
-    error_message = "manage_aws_auth_configmap must be true when node_groups are configured."
-  }
-}
-
-variable "create_node_access_entry" {
-  description = "Create an EC2_LINUX access entry for the node IAM role (required when authentication_mode is API)."
-  type        = bool
-  default     = false
-}
-
-variable "enable_node_groups" {
-  description = "Create managed node groups and node auth resources. When false, only the control plane and vpc-cni are provisioned."
-  type        = bool
-  default     = true
-}
-
-variable "node_groups" {
-  description = "Managed node groups keyed by group name."
-  type = map(object({
-    instance_types = list(string)
-    capacity_type  = string
-    min_size       = number
-    max_size       = number
-    desired_size   = number
-    disk_size_gb   = number
-    labels         = map(string)
-    taints = list(object({
-      key    = string
-      value  = string
-      effect = string
-    }))
-    ami_type = string
-  }))
-  default = {}
-
-  validation {
-    condition = alltrue([
-      for name, group in var.node_groups :
-      contains(["ON_DEMAND", "SPOT"], group.capacity_type)
-    ])
-    error_message = "Each node group capacity_type must be ON_DEMAND or SPOT."
-  }
-
-  validation {
-    condition = alltrue([
-      for name, group in var.node_groups :
-      group.min_size >= 0 && group.max_size >= group.min_size && group.desired_size >= group.min_size && group.desired_size <= group.max_size
-    ])
-    error_message = "Node group scaling bounds must satisfy min_size <= desired_size <= max_size."
-  }
-
-  validation {
-    condition = alltrue([
-      for name, group in var.node_groups :
-      alltrue([
-        for taint in group.taints :
-        contains(["NO_SCHEDULE", "NO_EXECUTE", "PREFER_NO_SCHEDULE"], taint.effect)
-      ])
-    ])
-    error_message = "Node group taint effect must be NO_SCHEDULE, NO_EXECUTE, or PREFER_NO_SCHEDULE."
-  }
 }
 
 variable "fargate_profiles" {

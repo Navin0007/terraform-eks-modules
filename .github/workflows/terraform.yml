@@ -42,14 +42,15 @@ on:
           - global/policies
           - environments/dev
       dev_eks_phase:
-        description: "Dev EKS phase — use addons-only to destroy/recreate add-ons without touching VPC/cluster"
+        description: "Dev EKS stage — use addons-only to destroy/recreate post-node add-ons without touching VPC/cluster"
         type: choice
         default: none
         options:
           - none
           - cluster
-          - nodes
           - irsa
+          - pre_node_addons
+          - nodes
           - addons
           - addons-only
           - all

@@ -35,9 +35,8 @@ wait_for_managed_node_join() {
     fi
   fi
 
-  # Node group create: Ready is enough. CCM init (topology labels) is gated before add-ons only.
   CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${region}" \
-    NODEGROUP_NAME="${nodegroup_name}" DESIRED_SIZE="${desired_size}" REQUIRE_CCM_INIT=false \
+    NODEGROUP_NAME="${nodegroup_name}" DESIRED_SIZE="${desired_size}" REQUIRE_CCM_INIT=true \
     bash "${script_dir}/wait-for-ready-nodes.sh"
 }
 

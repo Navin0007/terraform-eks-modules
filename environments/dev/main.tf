@@ -69,7 +69,7 @@ module "sg" {
 }
 
 module "eks" {
-  count  = local.eks_cluster_enabled ? 1 : 0
+  count  = local.eks_control_plane_enabled ? 1 : 0
   source = "../../modules/eks"
 
   project_name    = var.project_name
@@ -82,19 +82,12 @@ module "eks" {
   private_subnet_ids = module.vpc.private_subnet_ids
 
   cluster_role_arn = module.iam.cluster_role_arn
-  node_role_arn    = module.iam.node_role_arn
 
   control_plane_sg_id = module.sg.control_plane_sg_id
-  node_sg_id          = module.sg.node_sg_id
 
   kms_key_arn = var.state_kms_key_arn
 
-  enable_node_groups = local.eks_nodes_enabled
-  node_groups        = local.eks_nodes_enabled ? var.node_groups : {}
-
-  # Managed nodes need API_AND_CONFIG_MAP with BOTH EKS access entry + aws-auth mapRoles.
-  authentication_mode      = "API_AND_CONFIG_MAP"
-  create_node_access_entry = false
+  authentication_mode = "API_AND_CONFIG_MAP"
 
   endpoint_private_access = true
   # Public endpoint required so CI/Terraform can apply the aws-auth ConfigMap (nodes still use the private endpoint).
@@ -110,7 +103,7 @@ module "eks" {
 }
 
 module "iam_irsa" {
-  count  = local.irsa_enabled && local.eks_cluster_enabled ? 1 : 0
+  count  = local.irsa_enabled && local.eks_control_plane_enabled ? 1 : 0
   source = "../../modules/iam"
 
   project_name   = var.project_name
@@ -135,24 +128,43 @@ module "iam_irsa" {
   depends_on = [module.eks]
 }
 
+module "eks_node_groups" {
+  count  = local.eks_nodes_enabled && local.eks_control_plane_enabled ? 1 : 0
+  source = "../../modules/eks-node-groups"
+
+  project_name       = var.project_name
+  environment        = var.environment
+  cluster_name       = module.eks[0].cluster_name
+  region             = var.region
+  private_subnet_ids = module.vpc.private_subnet_ids
+  node_role_arn      = module.iam.node_role_arn
+  node_sg_id         = module.sg.node_sg_id
+  kms_key_arn        = var.state_kms_key_arn
+  node_groups        = var.node_groups
+  tags               = local.common_tags
+
+  depends_on = [
+    module.eks,
+    module.iam_irsa,
+    aws_eks_addon.kube_proxy,
+  ]
+}
+
 module "addons" {
-  count  = local.addons_enabled && local.eks_cluster_enabled && local.eks_nodes_enabled && local.irsa_enabled ? 1 : 0
+  count  = local.post_node_addons_enabled && local.eks_control_plane_enabled && local.eks_nodes_enabled && local.irsa_enabled ? 1 : 0
   source = "../../modules/addons"
 
-  project_name     = var.project_name
-  environment      = var.environment
-  cluster_name     = module.eks[0].cluster_name
-  cluster_id       = module.eks[0].cluster_id
-  cluster_version  = module.eks[0].cluster_version
-  vpc_cni_role_arn = module.iam_irsa[0].irsa_role_arns["vpc-cni"]
-  ebs_csi_role_arn = module.iam_irsa[0].irsa_role_arns["ebs-csi"]
-  # vpc-cni is installed in module.eks before the node group joins.
-  install_vpc_cni_addon  = false
-  nodes_ready_dependency = module.eks[0].nodes_joined
+  project_name           = var.project_name
+  environment            = var.environment
+  cluster_name           = module.eks[0].cluster_name
+  cluster_id             = module.eks[0].cluster_id
+  cluster_version        = module.eks[0].cluster_version
+  ebs_csi_role_arn       = module.iam_irsa[0].irsa_role_arns["ebs-csi"]
+  nodes_ready_dependency = module.eks_node_groups[0].nodes_joined
   tags                   = local.common_tags
 
   depends_on = [
     module.iam_irsa,
-    module.eks,
+    module.eks_node_groups,
   ]
 }

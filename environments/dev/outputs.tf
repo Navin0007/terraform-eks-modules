@@ -1,26 +1,31 @@
 output "enable_eks" {
-  description = "Whether all EKS phases are enabled (shortcut for cluster + nodes + IRSA + add-ons)."
+  description = "Whether all EKS stages are enabled (shortcut for control plane through post-node add-ons)."
   value       = var.enable_eks
 }
 
 output "enable_eks_cluster" {
-  description = "Whether the EKS control plane module is enabled."
-  value       = local.eks_cluster_enabled
-}
-
-output "enable_eks_nodes" {
-  description = "Whether managed node groups are enabled."
-  value       = local.eks_nodes_enabled
+  description = "Whether stage 3 (EKS control plane) is enabled."
+  value       = local.eks_control_plane_enabled
 }
 
 output "enable_irsa" {
-  description = "Whether IRSA roles are enabled."
+  description = "Whether stage 2 identity (IRSA roles) is enabled."
   value       = local.irsa_enabled
 }
 
+output "enable_pre_node_addons" {
+  description = "Whether stage 4 (vpc-cni, kube-proxy) is enabled."
+  value       = local.pre_node_addons_enabled
+}
+
+output "enable_eks_nodes" {
+  description = "Whether stage 5 (managed node groups) is enabled."
+  value       = local.eks_nodes_enabled
+}
+
 output "enable_addons" {
-  description = "Whether cluster add-ons (kube-proxy, CoreDNS, EBS CSI) are enabled."
-  value       = local.addons_enabled
+  description = "Whether stage 6 (CoreDNS, EBS CSI) is enabled."
+  value       = local.post_node_addons_enabled
 }
 
 output "vpc_id" {
@@ -39,7 +44,7 @@ output "private_subnet_ids" {
 }
 
 output "cluster_role_arn" {
-  description = "IAM role ARN for the EKS control plane (created before the cluster when EKS phases are off)."
+  description = "IAM role ARN for the EKS control plane (created before the cluster when EKS stages are off)."
   value       = module.iam.cluster_role_arn
 }
 
@@ -59,43 +64,48 @@ output "node_sg_id" {
 }
 
 output "cluster_name" {
-  description = "EKS cluster name (null until phase 1 cluster apply completes)."
-  value       = local.eks_cluster_enabled ? module.eks[0].cluster_name : null
+  description = "EKS cluster name (null until stage 3 control plane apply completes)."
+  value       = local.eks_control_plane_enabled ? module.eks[0].cluster_name : null
 }
 
 output "cluster_endpoint" {
   description = "Kubernetes API server endpoint."
-  value       = local.eks_cluster_enabled ? module.eks[0].cluster_endpoint : null
+  value       = local.eks_control_plane_enabled ? module.eks[0].cluster_endpoint : null
 }
 
 output "cluster_version" {
   description = "Kubernetes version running on the control plane."
-  value       = local.eks_cluster_enabled ? module.eks[0].cluster_version : null
+  value       = local.eks_control_plane_enabled ? module.eks[0].cluster_version : null
 }
 
 output "cluster_oidc_issuer_url" {
   description = "OIDC issuer URL for the EKS cluster."
-  value       = local.eks_cluster_enabled ? module.eks[0].cluster_oidc_issuer_url : null
+  value       = local.eks_control_plane_enabled ? module.eks[0].cluster_oidc_issuer_url : null
 }
 
 output "oidc_provider_arn" {
   description = "ARN of the IAM OIDC provider for IRSA."
-  value       = local.eks_cluster_enabled ? module.eks[0].oidc_provider_arn : null
+  value       = local.eks_control_plane_enabled ? module.eks[0].oidc_provider_arn : null
+}
+
+output "pre_node_addons_ready" {
+  description = "Set after vpc-cni and kube-proxy are installed (stage 4)."
+  value       = local.pre_node_addons_dependency != "" ? local.pre_node_addons_dependency : null
 }
 
 output "node_group_ids" {
   description = "Map of managed node group name to node group ID."
-  value       = local.eks_nodes_enabled && local.eks_cluster_enabled ? module.eks[0].node_group_ids : {}
+  value       = local.eks_nodes_enabled && local.eks_control_plane_enabled ? module.eks_node_groups[0].node_group_ids : {}
 }
 
 output "irsa_role_arns" {
   description = "Map of IRSA role key to IAM role ARN."
-  value       = local.irsa_enabled && local.eks_cluster_enabled ? module.iam_irsa[0].irsa_role_arns : {}
+  value       = local.irsa_enabled && local.eks_control_plane_enabled ? module.iam_irsa[0].irsa_role_arns : {}
 }
 
 output "addon_arns" {
-  description = "Map of EKS add-on name to add-on ARN."
-  value       = local.addons_enabled && local.eks_cluster_enabled ? module.addons[0].addon_arns : {}
+  description = "Map of post-node EKS add-on name to add-on ARN."
+  value       = local.post_node_addons_enabled && local.eks_control_plane_enabled ? module.addons[0].addon_arns : {}
 }
 
 output "kms_key_arn" {

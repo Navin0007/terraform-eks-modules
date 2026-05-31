@@ -56,8 +56,9 @@ tf_dev_extra_var_args() {
   printf '%s\n' \
     "-var=enable_eks=${TF_VAR_enable_eks:-false}" \
     "-var=enable_eks_cluster=${TF_VAR_enable_eks_cluster:-false}" \
-    "-var=enable_eks_nodes=${TF_VAR_enable_eks_nodes:-false}" \
     "-var=enable_irsa=${TF_VAR_enable_irsa:-false}" \
+    "-var=enable_pre_node_addons=${TF_VAR_enable_pre_node_addons:-false}" \
+    "-var=enable_eks_nodes=${TF_VAR_enable_eks_nodes:-false}" \
     "-var=enable_addons=${TF_VAR_enable_addons:-false}" \
     "-var=state_kms_key_arn=${TF_VAR_state_kms_key_arn}" \
     "-var=state_bucket_name=${TF_VAR_state_bucket_name}" \
@@ -72,47 +73,55 @@ _tf_bool_is_true() {
   esac
 }
 
-# Map workflow dev_eks_phase to TF_VAR_enable_* (cumulative phases).
+# Map workflow dev_eks_phase to TF_VAR_enable_* (cumulative stages).
 apply_dev_eks_phase_from_input() {
   local phase="${1:-none}"
 
   export TF_VAR_enable_eks=false
   export TF_VAR_enable_eks_cluster=false
-  export TF_VAR_enable_eks_nodes=false
   export TF_VAR_enable_irsa=false
+  export TF_VAR_enable_pre_node_addons=false
+  export TF_VAR_enable_eks_nodes=false
   export TF_VAR_enable_addons=false
 
   case "${phase}" in
     all)
       export TF_VAR_enable_eks=true
       ;;
-    cluster)
+    cluster|control_plane)
       export TF_VAR_enable_eks_cluster=true
+      ;;
+    irsa|identity)
+      export TF_VAR_enable_eks_cluster=true
+      export TF_VAR_enable_irsa=true
+      ;;
+    pre_node_addons|pre-node-addons)
+      export TF_VAR_enable_eks_cluster=true
+      export TF_VAR_enable_irsa=true
+      export TF_VAR_enable_pre_node_addons=true
       ;;
     nodes)
       export TF_VAR_enable_eks_cluster=true
+      export TF_VAR_enable_irsa=true
+      export TF_VAR_enable_pre_node_addons=true
       export TF_VAR_enable_eks_nodes=true
       ;;
-    irsa)
+    addons|addons-only|post_node_addons|post-node-addons)
       export TF_VAR_enable_eks_cluster=true
-      export TF_VAR_enable_eks_nodes=true
       export TF_VAR_enable_irsa=true
-      ;;
-    addons|addons-only)
-      export TF_VAR_enable_eks_cluster=true
+      export TF_VAR_enable_pre_node_addons=true
       export TF_VAR_enable_eks_nodes=true
-      export TF_VAR_enable_irsa=true
       export TF_VAR_enable_addons=true
       ;;
     none | foundation | "")
       ;;
     *)
-      echo "::error::Unknown dev_eks_phase: ${phase} (use none, cluster, nodes, irsa, addons, addons-only, or all)" >&2
+      echo "::error::Unknown dev_eks_phase: ${phase} (use none, cluster, irsa, pre_node_addons, nodes, addons, addons-only, or all)" >&2
       return 1
       ;;
   esac
 
-  echo "Dev EKS phase: ${phase} → cluster=${TF_VAR_enable_eks_cluster} nodes=${TF_VAR_enable_eks_nodes} irsa=${TF_VAR_enable_irsa} addons=${TF_VAR_enable_addons} (enable_eks=${TF_VAR_enable_eks})"
+  echo "Dev EKS phase: ${phase} → cluster=${TF_VAR_enable_eks_cluster} irsa=${TF_VAR_enable_irsa} pre_node_addons=${TF_VAR_enable_pre_node_addons} nodes=${TF_VAR_enable_eks_nodes} addons=${TF_VAR_enable_addons} (enable_eks=${TF_VAR_enable_eks})"
 }
 
 # Apply is additive: do not tear down IRSA/add-ons already in state when re-running a lower dev_eks_phase.
@@ -135,14 +144,21 @@ preserve_deployed_eks_phases_from_state() {
     :
   elif ! _tf_bool_is_true "${TF_VAR_enable_irsa:-false}"; then
     export TF_VAR_enable_irsa=true
-    echo "Preserving deployed IRSA (module.iam_irsa present in state; nodes-only apply will not destroy it)."
+    echo "Preserving deployed IRSA (module.iam_irsa present in state; lower-stage apply will not destroy it)."
+  fi
+
+  if ! terraform state list -no-color 2>/dev/null | grep -qE '^aws_eks_addon\.(vpc_cni|kube_proxy)'; then
+    :
+  elif ! _tf_bool_is_true "${TF_VAR_enable_pre_node_addons:-false}"; then
+    export TF_VAR_enable_pre_node_addons=true
+    echo "Preserving deployed pre-node add-ons (vpc-cni/kube-proxy in state; lower-stage apply will not destroy them)."
   fi
 
   if ! terraform state list -no-color 2>/dev/null | grep -qE '^module\.addons\[0\]\.'; then
     :
   elif ! _tf_bool_is_true "${TF_VAR_enable_addons:-false}"; then
     export TF_VAR_enable_addons=true
-    echo "Preserving deployed add-ons (module.addons present in state; lower-phase apply will not destroy them)."
+    echo "Preserving deployed post-node add-ons (module.addons present in state; lower-stage apply will not destroy them)."
   fi
 
   if [ "${did_pushd}" = true ]; then
@@ -153,8 +169,17 @@ preserve_deployed_eks_phases_from_state() {
 dev_stack_enable_eks_cluster() {
   _tf_bool_is_true "${TF_VAR_enable_eks:-false}" && return 0
   _tf_bool_is_true "${TF_VAR_enable_eks_cluster:-false}" && return 0
-  _tf_bool_is_true "${TF_VAR_enable_eks_nodes:-false}" && return 0
   _tf_bool_is_true "${TF_VAR_enable_irsa:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_pre_node_addons:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_eks_nodes:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_addons:-false}" && return 0
+  return 1
+}
+
+dev_stack_enable_pre_node_addons() {
+  _tf_bool_is_true "${TF_VAR_enable_eks:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_pre_node_addons:-false}" && return 0
+  _tf_bool_is_true "${TF_VAR_enable_eks_nodes:-false}" && return 0
   _tf_bool_is_true "${TF_VAR_enable_addons:-false}" && return 0
   return 1
 }
@@ -162,7 +187,6 @@ dev_stack_enable_eks_cluster() {
 dev_stack_enable_eks_nodes() {
   _tf_bool_is_true "${TF_VAR_enable_eks:-false}" && return 0
   _tf_bool_is_true "${TF_VAR_enable_eks_nodes:-false}" && return 0
-  _tf_bool_is_true "${TF_VAR_enable_irsa:-false}" && return 0
   _tf_bool_is_true "${TF_VAR_enable_addons:-false}" && return 0
   return 1
 }
@@ -220,22 +244,20 @@ log_eks_addon_lifecycle() {
   echo "Operation context: ${operation}"
   echo ""
   echo "Full platform order (dev_eks_phase cumulative):"
-  echo "  1. [cluster]  vpc-cni                 → module.eks/aws_eks_addon.vpc_cni (before node groups)"
-  echo "  2. [nodes]    managed node group      → module.eks/aws_eks_node_group (requires vpc-cni + Ready)"
-  echo "  3. [irsa]     IAM roles for SA        → module.iam_irsa (vpc-cni aws-node, ebs-csi-controller-sa)"
-  echo "  4. [addons]   kube-proxy              → module.addons/aws_eks_addon.kube_proxy (after nodes Ready)"
-  echo "  5. [addons]   coredns                 → module.addons/aws_eks_addon.coredns (after kube-proxy)"
-  echo "  6. [addons]   aws-ebs-csi-driver      → module.addons/aws_eks_addon.aws_ebs_csi_driver (after kube-proxy + ebs-csi IRSA)"
+  echo "  1. [foundation]  VPC, subnets, security groups, cluster/node IAM roles"
+  echo "  2. [cluster]     EKS control plane, CloudWatch logs, OIDC provider"
+  echo "  3. [irsa]        IRSA roles (vpc-cni, kube-proxy, ebs-csi)"
+  echo "  4. [pre_node]    vpc-cni (IRSA), kube-proxy → module.eks/aws_eks_addon.* (before node groups)"
+  echo "  5. [nodes]       launch template, managed node group, CCM init wait"
+  echo "  6. [addons]      CoreDNS, aws-ebs-csi-driver → module.addons (after nodes Ready + CCM)"
   echo ""
-  echo "module.addons Terraform CREATE order:"
-  echo "  (1) kube-proxy"
-  echo "  (2) coredns + aws-ebs-csi-driver   ← parallel after kube-proxy"
+  echo "module.addons Terraform CREATE order (stage 6 only):"
+  echo "  (1) coredns + aws-ebs-csi-driver   ← parallel after nodes_joined"
   echo ""
   echo "module.addons Terraform DESTROY order (reverse dependencies):"
   echo "  (1) coredns + aws-ebs-csi-driver"
-  echo "  (2) kube-proxy"
   echo ""
-  echo "Note: vpc-cni lives in module.eks; it is NOT destroyed when recreating module.addons only."
+  echo "Note: vpc-cni and kube-proxy live in module.eks (stage 4); they are NOT destroyed when recreating module.addons only."
   echo ""
 
   case "${operation}" in
@@ -243,8 +265,7 @@ log_eks_addon_lifecycle() {
       echo "Addons-only destroy/recreate (keeps cluster + nodes) — run from environments/dev after init:"
       echo "  terraform destroy \\"
       echo "    -target='$(dev_addons_state_prefix).aws_eks_addon.coredns' \\"
-      echo "    -target='$(dev_addons_state_prefix).aws_eks_addon.aws_ebs_csi_driver' \\"
-      echo "    -target='$(dev_addons_state_prefix).aws_eks_addon.kube_proxy'"
+      echo "    -target='$(dev_addons_state_prefix).aws_eks_addon.aws_ebs_csi_driver'"
       echo "  terraform apply   # dev_eks_phase: addons (or enable_irsa + enable_addons=true)"
       echo ""
       echo "GitHub Actions full destroy (dev_eks_phase: addons) removes cluster, nodes, IRSA, VPC, and add-ons."
@@ -310,11 +331,12 @@ dev_destroy_addons_only() {
 
   export TF_VAR_enable_eks=false
   export TF_VAR_enable_eks_cluster=true
-  export TF_VAR_enable_eks_nodes=true
   export TF_VAR_enable_irsa=true
+  export TF_VAR_enable_pre_node_addons=true
+  export TF_VAR_enable_eks_nodes=true
   export TF_VAR_enable_addons=false
 
-  echo "Applying with enable_addons=false (module.addons count=0 destroys kube-proxy, coredns, aws-ebs-csi-driver)..."
+  echo "Applying with enable_addons=false (module.addons count=0 destroys coredns and aws-ebs-csi-driver)..."
 
   if [ "$(pwd)" != "${dev_abs}" ]; then
     pushd "${dev_abs}" >/dev/null
@@ -3423,7 +3445,7 @@ dev_stack_prepare() {
   fi
 
   if ! dev_stack_enable_eks_nodes; then
-    echo "EKS phase: cluster only (control plane, OIDC, vpc-cni; no node groups yet)."
+    echo "EKS stage: control plane only (no node groups yet)."
     import_eks_foundation_resources "${dev_abs}"
     return 0
   fi
@@ -3442,7 +3464,7 @@ dev_stack_prepare() {
   fi
 }
 
-# Import cluster-level EKS resources (log group, OIDC, vpc-cni) when AWS has them but state was cleared.
+# Import cluster-level EKS resources (log group, OIDC, pre-node add-ons) when AWS has them but state was cleared.
 import_eks_foundation_resources() {
   local dev_abs="${1:-environments/dev}"
   local cluster_name eks_prefix log_group_name
@@ -3508,7 +3530,8 @@ import_eks_foundation_resources() {
       fi
     fi
 
-    import_if_missing "${eks_prefix}.aws_eks_addon.vpc_cni" "${cluster_name}:vpc-cni" true
+    import_if_missing "aws_eks_addon.vpc_cni[0]" "${cluster_name}:vpc-cni" true
+    import_if_missing "aws_eks_addon.kube_proxy[0]" "${cluster_name}:kube-proxy" true
 
     # EKS creates control-plane ↔ cluster SG rules at cluster create; drop stale TF addresses.
     for addr in \
@@ -3577,9 +3600,8 @@ import_existing_dev_resources() {
   }
 
   local addon_name addon_addr
-  for addon_name in kube-proxy coredns aws-ebs-csi-driver; do
+  for addon_name in coredns aws-ebs-csi-driver; do
     case "${addon_name}" in
-      kube-proxy) addon_addr="${addons_prefix}.aws_eks_addon.kube_proxy" ;;
       coredns) addon_addr="${addons_prefix}.aws_eks_addon.coredns" ;;
       aws-ebs-csi-driver) addon_addr="${addons_prefix}.aws_eks_addon.aws_ebs_csi_driver" ;;
     esac
@@ -3596,7 +3618,7 @@ import_existing_dev_resources() {
     --nodegroup-name "${nodegroup_name}" \
     --region "${AWS_REGION}" &>/dev/null; then
     import_if_missing \
-      "${eks_prefix}.aws_eks_node_group.main[\"${nodegroup_name}\"]" \
+      "module.eks_node_groups[0].aws_eks_node_group.main[\"${nodegroup_name}\"]" \
       "${cluster_name}:${nodegroup_name}" \
       true
   fi
@@ -3636,6 +3658,9 @@ dev_stack_state_category() {
     module.eks.* | module.eks\[0\].*)
       printf '%s' eks
       ;;
+    module.eks_node_groups.* | module.eks_node_groups\[0\].*)
+      printf '%s' eks_nodes
+      ;;
     module.addons.* | module.addons\[0\].*)
       printf '%s' addons
       ;;
@@ -3650,15 +3675,16 @@ dev_stack_apply_summary() {
   local dev_abs="${1:-environments/dev}"
   local did_pushd=false
   local addr category label
-  local -a categories=(vpc vpc_endpoints iam security_groups eks irsa addons other)
+  local -a categories=(vpc vpc_endpoints iam security_groups eks eks_nodes irsa addons other)
   local -A category_labels=(
     [vpc]="VPC and networking"
     [vpc_endpoints]="VPC endpoints"
     [iam]="IAM roles and attachments"
     [security_groups]="EKS security groups and rules"
-    [eks]="EKS cluster and node groups"
+    [eks]="EKS control plane"
+    [eks_nodes]="EKS node groups"
     [irsa]="IRSA roles"
-    [addons]="EKS add-ons"
+    [addons]="EKS post-node add-ons"
     [other]="Other"
   )
   local -A category_counts=()
@@ -3706,10 +3732,10 @@ dev_stack_apply_summary() {
   done
 
   echo "--- Key outputs ---"
-  for output in enable_eks enable_eks_cluster enable_eks_nodes enable_irsa enable_addons \
+  for output in enable_eks enable_eks_cluster enable_irsa enable_pre_node_addons enable_eks_nodes enable_addons \
     vpc_id public_subnet_ids private_subnet_ids \
     cluster_role_arn node_role_arn control_plane_sg_id node_sg_id \
-    kms_key_arn cluster_name cluster_endpoint oidc_provider_arn \
+    kms_key_arn cluster_name cluster_endpoint oidc_provider_arn pre_node_addons_ready \
     node_group_ids irsa_role_arns addon_arns; do
     if terraform output -no-color "${output}" &>/dev/null; then
       echo "${output} = $(terraform output -no-color "${output}" 2>/dev/null || true)"
