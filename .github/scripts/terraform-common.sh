@@ -221,6 +221,10 @@ dev_eks_state_prefix() {
   printf '%s' 'module.eks[0]'
 }
 
+dev_eks_nodes_state_prefix() {
+  printf '%s' 'module.eks_node_groups[0]'
+}
+
 dev_addons_state_prefix() {
   printf '%s' 'module.addons[0]'
 }
@@ -2077,7 +2081,10 @@ reset_stale_eks_managed_nodegroup() {
   local lt_id lt_name ng_role status asg_name need_delete
   cluster_name="$(eks_cluster_name)"
   nodegroup_name="general"
-  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
+
+  if ! eks_cluster_exists_in_aws "${cluster_name}"; then
+    return 0
+  fi
 
   if ! aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
@@ -2085,6 +2092,8 @@ reset_stale_eks_managed_nodegroup() {
     --region "${AWS_REGION}" &>/dev/null; then
     return 0
   fi
+
+  node_role_arn="$(node_iam_role_arn "${cluster_name}")"
 
   lt_id="$(aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
@@ -2162,6 +2171,7 @@ reset_stale_eks_managed_nodegroup() {
       local dev_abs
       dev_abs="$(resolve_dev_dir environments/dev)"
       pushd "${dev_abs}" >/dev/null
+      terraform state rm "$(dev_eks_nodes_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
       terraform state rm "$(dev_eks_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
       popd >/dev/null
     fi
@@ -2210,7 +2220,8 @@ delete_failed_eks_node_groups() {
         --region "${AWS_REGION}"
       if [ -d "${dev_abs}/.terraform" ]; then
         pushd "${dev_abs}" >/dev/null
-        terraform state rm "$(dev_eks_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
+        terraform state rm "$(dev_eks_nodes_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
+      terraform state rm "$(dev_eks_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
         popd >/dev/null
       fi
       ;;
@@ -2239,6 +2250,7 @@ cleanup_stale_eks_auth_state() {
     did_pushd=true
   fi
 
+  terraform state rm "$(dev_eks_nodes_state_prefix).aws_launch_template.node_group[\"general\"]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).aws_launch_template.node_group[\"general\"]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).kubernetes_config_map_v1.aws_auth[0]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" 2>/dev/null || true
@@ -2300,18 +2312,40 @@ apply_eks_public_endpoint_if_needed() {
 
 node_iam_role_arn() {
   local cluster_name="${1:-$(eks_cluster_name)}"
-  aws iam get-role \
-    --role-name "${cluster_name}-node" \
+  local role_name="${cluster_name}-node"
+  local arn
+
+  arn="$(aws iam get-role \
+    --role-name "${role_name}" \
     --query 'Role.Arn' \
-    --output text
+    --output text 2>/dev/null || true)"
+
+  if [ -n "${arn}" ] && [ "${arn}" != "None" ]; then
+    printf '%s\n' "${arn}"
+    return 0
+  fi
+
+  tf_common_vars
+  printf '%s\n' "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${role_name}"
 }
 
 cluster_iam_role_arn() {
   local cluster_name="${1:-$(eks_cluster_name)}"
-  aws iam get-role \
-    --role-name "${cluster_name}-cluster" \
+  local role_name="${cluster_name}-cluster"
+  local arn
+
+  arn="$(aws iam get-role \
+    --role-name "${role_name}" \
     --query 'Role.Arn' \
-    --output text
+    --output text 2>/dev/null || true)"
+
+  if [ -n "${arn}" ] && [ "${arn}" != "None" ]; then
+    printf '%s\n' "${arn}"
+    return 0
+  fi
+
+  tf_common_vars
+  printf '%s\n' "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${role_name}"
 }
 
 ensure_node_cluster_auth_for_dev() {
