@@ -3845,3 +3845,212 @@ dev_stack_apply_summary() {
     popd >/dev/null
   fi
 }
+
+# Consolidated end-of-job summary after Terraform apply + EKS validation (CI logs).
+dev_stack_post_apply_final_summary() {
+  local dev_abs="${1:-environments/dev}"
+  local validation_rc="${2:-0}"
+  local cluster_name="${3:-}"
+  local region="${4:-${AWS_REGION:-us-east-1}}"
+  local did_pushd=false
+  local cluster_status k8s_version ready_nodes total_nodes ng_list
+  local validation_label="PASSED"
+  local overall="SUCCESS"
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  echo ""
+  echo "============================================================"
+  echo "  DEV STACK POST-APPLY — FINAL SUMMARY"
+  echo "============================================================"
+  echo "  Terraform apply:  completed"
+
+  if [ -z "${cluster_name}" ] || [ "${cluster_name}" = "null" ]; then
+    echo "  EKS validation:   skipped (no cluster in state)"
+    echo "  Stack scope:      foundation / VPC (EKS not enabled)"
+    echo "  Overall result:   SUCCESS"
+    echo "============================================================"
+    [ "${did_pushd}" = true ] && popd >/dev/null
+    return 0
+  fi
+
+  if [ "${validation_rc}" -ne 0 ]; then
+    validation_label="FAILED"
+    overall="FAILED"
+  fi
+
+  cluster_status="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${region}" \
+    --query 'cluster.status' \
+    --output text 2>/dev/null || echo "unknown")"
+  k8s_version="$(aws eks describe-cluster \
+    --name "${cluster_name}" \
+    --region "${region}" \
+    --query 'cluster.version' \
+    --output text 2>/dev/null || echo "unknown")"
+
+  aws eks update-kubeconfig --name "${cluster_name}" --region "${region}" >/dev/null 2>&1 || true
+  ready_nodes="$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready" { n++ } END { print n + 0 }')"
+  total_nodes="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+
+  ng_list="$(terraform output -json node_group_ids 2>/dev/null | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(', '.join(data.keys()) if isinstance(data, dict) and data else 'none')
+except Exception:
+    print('none')
+" 2>/dev/null || echo "none")"
+
+  echo "  EKS validation:   ${validation_label}"
+  echo "  Cluster:          ${cluster_name}"
+  echo "  Region:           ${region}"
+  echo "  Control plane:    ${cluster_status} (Kubernetes ${k8s_version})"
+  echo "  Node groups:      ${ng_list}"
+  echo "  Nodes Ready:      ${ready_nodes}/${total_nodes}"
+  echo "  EKS phases:"
+  for phase in enable_eks_cluster enable_irsa enable_pre_node_addons enable_eks_nodes enable_addons; do
+    if dev_stack_output_enabled "${phase}" 2>/dev/null; then
+      echo "    - ${phase}=true"
+    fi
+  done
+  if dev_stack_output_enabled enable_eks 2>/dev/null; then
+    echo "    - enable_eks=true (all phases)"
+  fi
+  echo "  Overall result:   ${overall}"
+  echo "============================================================"
+
+  if [ -n "${EKS_VALIDATION_CHECKLIST_REPORT:-}" ] && [ -f "${EKS_VALIDATION_CHECKLIST_REPORT}" ]; then
+    echo ""
+    cat "${EKS_VALIDATION_CHECKLIST_REPORT}"
+  fi
+
+  [ "${did_pushd}" = true ] && popd >/dev/null
+  return "${validation_rc}"
+}
+
+# True when a terraform output is the string "true".
+dev_stack_output_enabled() {
+  local name="$1"
+  terraform output -no-color "${name}" 2>/dev/null | grep -q '^true$'
+}
+
+# Run post-apply EKS validation (same script as modules/eks-validation).
+# Invoked after every successful environments/dev apply in CI. Skips entirely when no
+# cluster exists; otherwise skips check categories that match disabled EKS phases.
+run_eks_post_apply_validation() {
+  local dev_abs="${1:-environments/dev}"
+  local repo_root script_path
+  local did_pushd=false
+  local skip_nodes skip_addons skip_pod_networking skip_storage skip_iam
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  repo_root="$(cd "${dev_abs}/../.." && pwd)"
+  script_path="${repo_root}/modules/eks-validation/scripts/validate-eks-cluster.sh"
+
+  if [ ! -x "${script_path}" ] && [ -f "${script_path}" ]; then
+    chmod +x "${script_path}"
+  fi
+  if [ ! -f "${script_path}" ]; then
+    echo "::warning::EKS validation script not found at ${script_path}"
+    return 0
+  fi
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  local cluster_name
+  cluster_name="$(terraform output -raw cluster_name 2>/dev/null || true)"
+  if [ -z "${cluster_name}" ] || [ "${cluster_name}" = "null" ]; then
+    echo "SKIP: no EKS cluster in state — post-apply validation not required."
+    dev_stack_post_apply_final_summary "${dev_abs}" 0 "" "${AWS_REGION:-us-east-1}"
+    [ "${did_pushd}" = true ] && popd >/dev/null
+    return 0
+  fi
+
+  skip_nodes="false"
+  skip_addons="false"
+  skip_pod_networking="false"
+  skip_storage="false"
+  skip_iam="false"
+
+  if ! dev_stack_output_enabled enable_eks_nodes && ! dev_stack_output_enabled enable_eks; then
+    skip_nodes="true"
+    skip_pod_networking="true"
+    skip_storage="true"
+  fi
+  if ! dev_stack_output_enabled enable_pre_node_addons && ! dev_stack_output_enabled enable_eks; then
+    skip_addons="true"
+  fi
+  if ! dev_stack_output_enabled enable_addons && ! dev_stack_output_enabled enable_eks; then
+    skip_storage="true"
+  fi
+  if ! dev_stack_output_enabled enable_irsa && ! dev_stack_output_enabled enable_eks; then
+    skip_iam="true"
+  fi
+
+  local region cluster_version vpc_id vpc_cidr validate_post_node
+  region="${AWS_REGION:-us-east-1}"
+  cluster_version="$(terraform output -raw cluster_version 2>/dev/null || true)"
+  vpc_id="$(terraform output -raw vpc_id 2>/dev/null || true)"
+  vpc_cidr=""
+  if [ -f terraform.tfvars ]; then
+    vpc_cidr="$(grep -E '^vpc_cidr' terraform.tfvars 2>/dev/null | head -1 | sed -E 's/.*=\s*"([^"]+)".*/\1/' || true)"
+  fi
+
+  local private_subnets public_subnets node_groups
+  private_subnets="$(terraform output -json private_subnet_ids 2>/dev/null | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)))" 2>/dev/null || true)"
+  public_subnets="$(terraform output -json public_subnet_ids 2>/dev/null | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)))" 2>/dev/null || true)"
+  node_groups="$(terraform output -json node_group_ids 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(d.keys()) if isinstance(d,dict) else 'general')" 2>/dev/null || echo "general")"
+
+  validate_post_node="false"
+  if dev_stack_output_enabled enable_addons || dev_stack_output_enabled enable_eks; then
+    validate_post_node="true"
+  fi
+
+  echo "=== EKS post-apply validation (after apply) ==="
+  echo "Phase skips: nodes=${skip_nodes} addons=${skip_addons} pod_networking=${skip_pod_networking} storage=${skip_storage} iam=${skip_iam}"
+  local checklist_report
+  checklist_report="$(mktemp)"
+  CLUSTER_NAME="${cluster_name}" \
+  AWS_REGION="${region}" \
+  EXPECTED_CLUSTER_NAME="${cluster_name}" \
+  EXPECTED_CLUSTER_VERSION="${cluster_version}" \
+  EXPECTED_VPC_ID="${vpc_id}" \
+  EXPECTED_VPC_CIDR="${vpc_cidr}" \
+  PRIVATE_SUBNET_IDS="${private_subnets}" \
+  PUBLIC_SUBNET_IDS="${public_subnets}" \
+  EXPECTED_CLUSTER_ROLE_ARN="$(terraform output -raw cluster_role_arn 2>/dev/null || true)" \
+  EXPECTED_NODE_ROLE_ARN="$(terraform output -raw node_role_arn 2>/dev/null || true)" \
+  EXPECTED_OIDC_PROVIDER_ARN="$(terraform output -raw oidc_provider_arn 2>/dev/null || true)" \
+  CONTROL_PLANE_SG_ID="$(terraform output -raw control_plane_sg_id 2>/dev/null || true)" \
+  NODEGROUP_NAMES="${node_groups}" \
+  EBS_CSI_ROLE_ARN="$(terraform output -json irsa_role_arns 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ebs-csi',''))" 2>/dev/null || true)" \
+  VALIDATE_POST_NODE_ADDONS="${validate_post_node}" \
+  ALLOW_PUBLIC_WORLD_CIDR="true" \
+  SKIP_NODES="${skip_nodes}" \
+  SKIP_ADDONS="${skip_addons}" \
+  SKIP_POD_NETWORKING="${skip_pod_networking}" \
+  SKIP_STORAGE="${skip_storage}" \
+  SKIP_IAM="${skip_iam}" \
+  CHECKLIST_REPORT_PATH="${checklist_report}" \
+  bash "${script_path}"
+
+  local rc=$?
+  export EKS_VALIDATION_CHECKLIST_REPORT="${checklist_report}"
+  if [ "${rc}" -ne 0 ]; then
+    echo "::error::EKS post-apply validation failed — apply job marked failed." >&2
+  fi
+  dev_stack_post_apply_final_summary "${dev_abs}" "${rc}" "${cluster_name}" "${region}"
+  rm -f "${checklist_report}" 2>/dev/null || true
+  [ "${did_pushd}" = true ] && popd >/dev/null
+  return "${rc}"
+}

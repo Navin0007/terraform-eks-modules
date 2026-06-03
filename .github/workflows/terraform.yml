@@ -9,6 +9,8 @@ on:
       - ".tflint.hcl"
       - ".github/workflows/terraform.yml"
       - ".github/scripts/**"
+      - "modules/eks-validation/**"
+      - "docs/EKS-POST-APPLY-VALIDATION.md"
   push:
     branches: [main]
     paths:
@@ -18,6 +20,8 @@ on:
       - ".tflint.hcl"
       - ".github/workflows/terraform.yml"
       - ".github/scripts/**"
+      - "modules/eks-validation/**"
+      - "docs/EKS-POST-APPLY-VALIDATION.md"
   workflow_dispatch:
     inputs:
       operation:
@@ -351,6 +355,7 @@ jobs:
             exit 1
           fi
           dev_stack_apply_summary environments/dev
+          run_eks_post_apply_validation environments/dev
           popd >/dev/null
 
       - name: Policies destroy

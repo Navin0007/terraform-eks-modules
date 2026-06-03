@@ -14,6 +14,8 @@ locals {
       ))
     })
   })
+
+  total_node_desired_size = sum([for _, ng in var.node_groups : ng.desired_size])
 }
 
 module "vpc" {
@@ -163,8 +165,8 @@ module "addons" {
   nodes_ready_dependency = module.eks_node_groups[0].nodes_joined
   node_role_arn          = module.iam.node_role_arn
   region                 = var.region
-  nodegroup_name         = "general"
-  node_desired_size      = var.node_groups["general"].desired_size
+  nodegroup_name         = "app"
+  node_desired_size      = local.total_node_desired_size
   tags                   = local.common_tags
 
   depends_on = [

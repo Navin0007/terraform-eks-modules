@@ -104,16 +104,31 @@ variable "node_groups" {
     ami_type = string
   }))
   default = {
-    general = {
-      instance_types = ["t3.medium"]
+    app = {
+      instance_types = ["t2.micro"]
       capacity_type  = "ON_DEMAND"
       min_size       = 1
       max_size       = 3
-      desired_size   = 2
+      desired_size   = 1
       disk_size_gb   = 20
-      labels         = {}
+      labels = {
+        workload = "app"
+      }
       taints         = []
-      ami_type       = "AL2023_x86_64_STANDARD"
+      ami_type       = "AL2_x86_64"
+    }
+    webapp = {
+      instance_types = ["t2.micro"]
+      capacity_type  = "ON_DEMAND"
+      min_size       = 1
+      max_size       = 3
+      desired_size   = 1
+      disk_size_gb   = 20
+      labels = {
+        workload = "webapp"
+      }
+      taints         = []
+      ami_type       = "AL2_x86_64"
     }
   }
 }

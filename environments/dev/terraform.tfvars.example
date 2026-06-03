@@ -22,16 +22,31 @@ private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
 public_subnet_cidrs  = ["10.0.101.0/24", "10.0.102.0/24"]
 
 node_groups = {
-  general = {
-    instance_types = ["t3.medium"]
+  app = {
+    instance_types = ["t2.micro"]
     capacity_type  = "ON_DEMAND"
     min_size       = 1
     max_size       = 3
-    desired_size   = 2
+    desired_size   = 1
     disk_size_gb   = 20
-    labels         = {}
-    taints         = []
-    ami_type       = "AL2_x86_64"
+    labels = {
+      workload = "app"
+    }
+    taints   = []
+    ami_type = "AL2_x86_64"
+  }
+  webapp = {
+    instance_types = ["t2.micro"]
+    capacity_type  = "ON_DEMAND"
+    min_size       = 1
+    max_size       = 3
+    desired_size   = 1
+    disk_size_gb   = 20
+    labels = {
+      workload = "webapp"
+    }
+    taints   = []
+    ami_type = "AL2_x86_64"
   }
 }
 

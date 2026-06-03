@@ -1,7 +1,7 @@
 resource "aws_launch_template" "node_group" {
   for_each = var.node_groups
 
-  name_prefix = "${var.cluster_name}-${each.key}-"
+  name = "${var.cluster_name}-${each.key}"
 
   metadata_options {
     http_endpoint               = "enabled"
