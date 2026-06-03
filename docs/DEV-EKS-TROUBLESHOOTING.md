@@ -945,6 +945,38 @@ GitHub Actions OIDC role sessions default to **1 hour**. A full dev apply (node 
 
 ---
 
+### 31. `InvalidLaunchTemplateName.AlreadyExistsException`
+
+**Symptoms**
+
+```
+Error: creating EC2 Launch Template (my-project-dev-eks-app): ... Launch template name already in use.
+```
+
+**Cause**
+
+Launch templates use a **fixed name** `{cluster}-{nodegroup}` (e.g. `my-project-dev-eks-app`). AWS still has them from a prior apply, but Terraform state was cleared, forked (`errored.tfstate`), or never imported after renaming from `general` → `app`/`webapp`.
+
+**Fix (in repo)**
+
+CI runs `import_missing_node_launch_templates` before apply (and in the import step) to import existing `lt-*` IDs into `module.eks_node_groups[0].aws_launch_template.node_group["…"]`.
+
+**Manual recovery**
+
+```bash
+cd environments/dev
+terraform init
+# For each node group (app, webapp):
+LT_ID=$(aws ec2 describe-launch-templates --launch-template-names my-project-dev-eks-app \
+  --query 'LaunchTemplates[0].LaunchTemplateId' --output text)
+terraform import 'module.eks_node_groups[0].aws_launch_template.node_group["app"]' "${LT_ID}"
+terraform apply
+```
+
+Delete orphaned templates only if they are not attached to an active node group.
+
+---
+
 | Symptom | First reference |
 |--------|------------------|
 | KMS alias NotFound on bootstrap init | §1a — `bootstrap_remote_backend_ready` |
@@ -972,3 +1004,4 @@ GitHub Actions OIDC role sessions default to **1 hour**. A full dev apply (node 
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
 | Stale failed node group | `terraform-common.sh` `delete_failed_eks_node_groups` |
 | **ExpiredToken / errored.tfstate** | Issue 30 — refresh OIDC, `state push`, `force-unlock` |
+| **Launch template name already in use** | Issue 31 — import `lt-*` into state; CI runs `import_missing_node_launch_templates` |

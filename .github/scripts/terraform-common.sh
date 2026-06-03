@@ -3572,6 +3572,7 @@ dev_stack_prepare() {
   apply_eks_public_endpoint_if_needed "${dev_abs}"
   reset_stale_eks_managed_nodegroup
   delete_failed_eks_node_groups "${dev_abs}"
+  import_missing_node_launch_templates "${dev_abs}"
   repair_dev_node_join_if_needed "${dev_abs}"
 
   if dev_stack_enable_addons; then
@@ -3665,6 +3666,58 @@ import_eks_foundation_resources() {
   fi
 }
 
+# Import EC2 launch templates named {cluster}-{nodegroup} when they exist in AWS but not in state.
+import_missing_node_launch_templates() {
+  local dev_abs="${1:-environments/dev}"
+  local did_pushd=false
+  local cluster_name nodegroup_name lt_name lt_id nodes_prefix addr
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  tf_export_dev_vars
+
+  if ! dev_stack_enable_eks_nodes; then
+    return 0
+  fi
+
+  cluster_name="$(eks_cluster_name)"
+  nodes_prefix="$(dev_eks_nodes_state_prefix)"
+
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  mapfile -t var_args < <(tf_var_args)
+  mapfile -t dev_args < <(tf_dev_extra_var_args)
+
+  for nodegroup_name in general $(dev_stack_nodegroup_names_list "${dev_abs}"); do
+    nodegroup_name="$(echo "${nodegroup_name}" | tr -d ' ')"
+    [ -z "${nodegroup_name}" ] && continue
+    lt_name="${cluster_name}-${nodegroup_name}"
+    addr="${nodes_prefix}.aws_launch_template.node_group[\"${nodegroup_name}\"]"
+
+    if terraform state show -no-color "${addr}" &>/dev/null; then
+      continue
+    fi
+
+    lt_id="$(aws ec2 describe-launch-templates \
+      --launch-template-names "${lt_name}" \
+      --region "${AWS_REGION}" \
+      --query 'LaunchTemplates[0].LaunchTemplateId' \
+      --output text 2>/dev/null || true)"
+    if [ -z "${lt_id}" ] || [ "${lt_id}" = "None" ]; then
+      continue
+    fi
+
+    echo "Importing existing launch template ${lt_name} (${lt_id}) into ${addr}..."
+    if ! terraform import -input=false "${var_args[@]}" "${dev_args[@]}" "${addr}" "${lt_id}"; then
+      echo "::warning::Could not import ${addr}; apply may fail if launch template ${lt_name} already exists."
+    fi
+  done
+
+  [ "${did_pushd}" = true ] && popd >/dev/null
+}
+
 # Import dev/EKS resources that exist in AWS but are missing from state (partial apply recovery).
 import_existing_dev_resources() {
   local dev_abs="${1:-environments/dev}"
@@ -3677,6 +3730,8 @@ import_existing_dev_resources() {
     echo "EKS nodes phase off; skipping node group and add-on imports."
     return 0
   fi
+
+  import_missing_node_launch_templates "${dev_abs}"
 
   local cluster_name eks_prefix addons_prefix nodegroup_name
   cluster_name="$(eks_cluster_name)"
