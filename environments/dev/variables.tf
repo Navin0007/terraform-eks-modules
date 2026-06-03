@@ -114,8 +114,8 @@ variable "node_groups" {
       labels = {
         workload = "app"
       }
-      taints         = []
-      ami_type       = "AL2_x86_64"
+      taints   = []
+      ami_type = "AL2_x86_64"
     }
     webapp = {
       instance_types = ["t2.micro"]
@@ -127,8 +127,8 @@ variable "node_groups" {
       labels = {
         workload = "webapp"
       }
-      taints         = []
-      ami_type       = "AL2_x86_64"
+      taints   = []
+      ami_type = "AL2_x86_64"
     }
   }
 }
