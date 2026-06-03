@@ -105,7 +105,7 @@ variable "node_groups" {
   }))
   default = {
     app = {
-      instance_types = ["t2.micro"]
+      instance_types = ["t3.small"]
       capacity_type  = "ON_DEMAND"
       min_size       = 1
       max_size       = 3
@@ -118,7 +118,7 @@ variable "node_groups" {
       ami_type = "AL2_x86_64"
     }
     webapp = {
-      instance_types = ["t2.micro"]
+      instance_types = ["t3.small"]
       capacity_type  = "ON_DEMAND"
       min_size       = 1
       max_size       = 3

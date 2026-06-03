@@ -138,7 +138,7 @@ Re-run bootstrap per account/environment if state infrastructure is isolated per
 | `azs` | `list(string)` | `us-east-1a`, `us-east-1b` | Availability zones |
 | `private_subnet_cidrs` | `list(string)` | `10.0.1.0/24`, `10.0.2.0/24` | Private subnet CIDRs |
 | `public_subnet_cidrs` | `list(string)` | `10.0.101.0/24`, `10.0.102.0/24` | Public subnet CIDRs |
-| `node_groups` | `map(object)` | `app` and `webapp` groups (`t2.micro`, 1 node each) | EKS managed node groups |
+| `node_groups` | `map(object)` | `app` and `webapp` groups (`t3.small`, 1 node each) | EKS managed node groups |
 | `irsa_roles` | `map(object)` | `vpc-cni`, `ebs-csi` | IRSA roles (second IAM pass); EBS CSI policy ARN wired from policies module |
 | `tags` | `map(string)` | `managed_by`, `owner` | Extra tags (merged with `project`, `environment`) |
 | `state_bucket_name` | `string` | `""` | Bootstrap bucket (document only; set `backend.tf` manually) |
