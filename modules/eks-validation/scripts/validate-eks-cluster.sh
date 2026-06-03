@@ -14,8 +14,10 @@ log_section() {
 }
 
 truthy() {
-  case "${1:-}" in
-    1 | true | TRUE | yes | YES) return 0 ;;
+  local v
+  v="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "${v}" in
+    1 | true | yes) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -419,7 +421,7 @@ check_control_plane() {
     --query 'cluster.identity.oidc.issuer' \
     --output text)"
   if [ -n "${oidc}" ] && [ "${oidc}" != "None" ]; then
-    if curl -fsS --max-time 10 "${oidc}.well-known/openid-configuration" >/dev/null 2>&1; then
+    if curl -fsS --max-time 10 "${oidc}/.well-known/openid-configuration" >/dev/null 2>&1; then
       record_pass "OIDC issuer is configured and reachable"
     else
       record_fail "OIDC issuer ${oidc} is not reachable"
@@ -901,7 +903,7 @@ check_security() {
   if truthy "${private_access}"; then
     record_pass "private API endpoint access is enabled"
   else
-    record_fail "private API endpoint access is disabled"
+    record_fail "private API endpoint access is disabled (endpointPrivateAccess=${private_access:-unknown}; expected True — run terraform apply or aws eks update-cluster-config)"
   fi
 
   if truthy "${ALLOW_PUBLIC_WORLD_CIDR:-false}"; then
