@@ -162,7 +162,8 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-          role-duration-seconds: 10800
+          # Must be <= IAM role MaxSessionDuration (default 3600). Increase the role max in IAM to use longer.
+          role-duration-seconds: 3600
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -346,7 +347,8 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-          role-duration-seconds: 10800
+          # Must be <= IAM role MaxSessionDuration (default 3600). Increase the role max in IAM to use longer.
+          role-duration-seconds: 3600
 
       - name: Dev apply
         if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'environments/dev')

@@ -204,6 +204,7 @@ Use **operation** `apply` for the full stack or `plan` to preview. Narrow **targ
 ### Repository setup
 
 1. IAM role for GitHub OIDC (trust `token.actions.githubusercontent.com`, subject scoped to this repo).
+   - **Maximum session duration:** at least `3600` seconds (workflow requests `role-duration-seconds: 3600`). For long EKS applies, increase the role max (e.g. `14400`) and raise `role-duration-seconds` in `.github/workflows/terraform.yml` to the same value (never above the role max).
 2. Policy: permissions for bootstrap (KMS, S3, DynamoDB), policies (IAM), and dev (VPC, EKS, IAM, etc.).
 3. **Settings → Secrets and variables → Actions**
    - Secret: `AWS_ROLE_ARN`

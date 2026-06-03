@@ -2982,7 +2982,7 @@ diagnose_node_join_failure() {
 
   if aws_credentials_expired; then
     echo "::error::AWS credentials expired — diagnostics below may show false FAIL (IAM/cluster not found, etc.)."
-    echo "Re-run the workflow after refreshing OIDC credentials (CI now uses 3h role duration + refresh before dev apply)."
+    echo "Re-run the workflow after refreshing OIDC credentials (CI refreshes OIDC before dev apply; session max is role MaxSessionDuration, typically 1h)."
   fi
 
   all_groups="$(dev_stack_nodegroup_names_list environments/dev)"

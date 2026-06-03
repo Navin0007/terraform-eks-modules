@@ -922,10 +922,12 @@ GitHub Actions OIDC role sessions default to **1 hour**. A full dev apply (node 
 
 **Fix (in repo)**
 
-- CI: `role-duration-seconds: 10800` (3h) on `configure-aws-credentials`
-- Refresh credentials immediately before **Dev apply**
+- CI: `role-duration-seconds: 3600` on `configure-aws-credentials` (must not exceed the GitHub OIDC role `MaxSessionDuration` in IAM)
+- Refresh credentials immediately before **Dev apply** (resets the 1h session clock mid-pipeline)
 - Job timeout increased to 150 minutes for apply
 - Diagnostics use node groups **`app` / `webapp`** (not legacy `general`)
+
+**Optional — longer sessions:** In IAM, set the GitHub Actions role **Maximum session duration** to e.g. `14400` (4h), then raise `role-duration-seconds` in `.github/workflows/terraform.yml` to match (never above the role max).
 
 **Recovery after a failed apply**
 
