@@ -2136,17 +2136,20 @@ reset_stale_eks_managed_nodegroup() {
   local cluster_name nodegroup_name node_role_arn
   local lt_id lt_name ng_role status asg_name need_delete
   cluster_name="$(eks_cluster_name)"
-  nodegroup_name="general"
 
   if ! eks_cluster_exists_in_aws "${cluster_name}"; then
     return 0
   fi
 
+  for nodegroup_name in general $(dev_stack_nodegroup_names_list environments/dev); do
+    nodegroup_name="$(echo "${nodegroup_name}" | tr -d ' ')"
+    [ -z "${nodegroup_name}" ] && continue
+
   if ! aws eks describe-nodegroup \
     --cluster-name "${cluster_name}" \
     --nodegroup-name "${nodegroup_name}" \
     --region "${AWS_REGION}" &>/dev/null; then
-    return 0
+    continue
   fi
 
   node_role_arn="$(node_iam_role_arn "${cluster_name}")"
@@ -2227,11 +2230,11 @@ reset_stale_eks_managed_nodegroup() {
       local dev_abs
       dev_abs="$(resolve_dev_dir environments/dev)"
       pushd "${dev_abs}" >/dev/null
-      terraform state rm "$(dev_eks_nodes_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
-      terraform state rm "$(dev_eks_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
+      dev_stack_rm_nodegroup_from_state "${nodegroup_name}"
       popd >/dev/null
     fi
   fi
+  done
 }
 
 # Delete node groups stuck in CREATE_FAILED so the next apply can recreate them.
@@ -2239,56 +2242,59 @@ delete_failed_eks_node_groups() {
   local dev_abs="${1:-environments/dev}"
   dev_abs="$(resolve_dev_dir "${dev_abs}")"
   tf_export_dev_vars
-  local cluster_name nodegroup_name status
+  local cluster_name nodegroup_name status ng
   cluster_name="$(eks_cluster_name)"
-  nodegroup_name="general"
 
-  if ! aws eks describe-nodegroup \
-    --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" \
-    --region "${AWS_REGION}" &>/dev/null; then
-    return 0
-  fi
+  for nodegroup_name in general $(dev_stack_nodegroup_names_list "${dev_abs}"); do
+    nodegroup_name="$(echo "${nodegroup_name}" | tr -d ' ')"
+    [ -z "${nodegroup_name}" ] && continue
 
-  status="$(aws eks describe-nodegroup \
-    --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" \
-    --region "${AWS_REGION}" \
-    --query 'nodegroup.status' \
-    --output text)"
+    if ! aws eks describe-nodegroup \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" &>/dev/null; then
+      continue
+    fi
 
-  case "${status}" in
-    CREATE_FAILED)
-      local node_role_arn repo_root
-      node_role_arn="$(node_iam_role_arn "${cluster_name}")"
-      repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-      echo "Resetting node access entry before recreating failed node group ${nodegroup_name}..."
-      CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
-        bash "${repo_root}/modules/eks/scripts/delete-node-access-entry.sh" || true
-      echo "Deleting failed node group ${nodegroup_name} (status=${status})..."
-      aws eks delete-nodegroup \
-        --cluster-name "${cluster_name}" \
-        --nodegroup-name "${nodegroup_name}" \
-        --region "${AWS_REGION}"
-      aws eks wait nodegroup-deleted \
-        --cluster-name "${cluster_name}" \
-        --nodegroup-name "${nodegroup_name}" \
-        --region "${AWS_REGION}"
-      if [ -d "${dev_abs}/.terraform" ]; then
-        pushd "${dev_abs}" >/dev/null
-        terraform state rm "$(dev_eks_nodes_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
-      terraform state rm "$(dev_eks_state_prefix).aws_eks_node_group.main[\"general\"]" 2>/dev/null || true
-        popd >/dev/null
-      fi
-      ;;
-    DELETING)
-      echo "Waiting for node group ${nodegroup_name} deletion..."
-      aws eks wait nodegroup-deleted \
-        --cluster-name "${cluster_name}" \
-        --nodegroup-name "${nodegroup_name}" \
-        --region "${AWS_REGION}"
-      ;;
-  esac
+    status="$(aws eks describe-nodegroup \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" \
+      --query 'nodegroup.status' \
+      --output text)"
+
+    case "${status}" in
+      CREATE_FAILED)
+        local node_role_arn repo_root
+        node_role_arn="$(node_iam_role_arn "${cluster_name}")"
+        repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+        echo "Resetting node access entry before recreating failed node group ${nodegroup_name}..."
+        CLUSTER_NAME="${cluster_name}" NODE_ROLE_ARN="${node_role_arn}" AWS_REGION="${AWS_REGION}" \
+          bash "${repo_root}/modules/eks/scripts/delete-node-access-entry.sh" || true
+        echo "Deleting failed node group ${nodegroup_name} (status=${status})..."
+        aws eks delete-nodegroup \
+          --cluster-name "${cluster_name}" \
+          --nodegroup-name "${nodegroup_name}" \
+          --region "${AWS_REGION}"
+        aws eks wait nodegroup-deleted \
+          --cluster-name "${cluster_name}" \
+          --nodegroup-name "${nodegroup_name}" \
+          --region "${AWS_REGION}"
+        if [ -d "${dev_abs}/.terraform" ]; then
+          pushd "${dev_abs}" >/dev/null
+          dev_stack_rm_nodegroup_from_state "${nodegroup_name}"
+          popd >/dev/null
+        fi
+        ;;
+      DELETING)
+        echo "Waiting for node group ${nodegroup_name} deletion..."
+        aws eks wait nodegroup-deleted \
+          --cluster-name "${cluster_name}" \
+          --nodegroup-name "${nodegroup_name}" \
+          --region "${AWS_REGION}"
+        ;;
+    esac
+  done
 }
 
 # Drop stale state addresses from older module versions.
@@ -2306,8 +2312,11 @@ cleanup_stale_eks_auth_state() {
     did_pushd=true
   fi
 
-  terraform state rm "$(dev_eks_nodes_state_prefix).aws_launch_template.node_group[\"general\"]" 2>/dev/null || true
-  terraform state rm "$(dev_eks_state_prefix).aws_launch_template.node_group[\"general\"]" 2>/dev/null || true
+  for ng in general $(dev_stack_nodegroup_names_list "${dev_abs}"); do
+    ng="$(echo "${ng}" | tr -d ' ')"
+    [ -z "${ng}" ] && continue
+    dev_stack_rm_nodegroup_from_state "${ng}"
+  done
   terraform state rm "$(dev_eks_state_prefix).kubernetes_config_map_v1.aws_auth[0]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).aws_eks_access_policy_association.node[0]" 2>/dev/null || true
   terraform state rm "$(dev_eks_state_prefix).null_resource.aws_auth_node_role[0]" 2>/dev/null || true
@@ -2493,7 +2502,7 @@ repair_dev_node_join_if_needed() {
   fi
 
   cluster_name="$(eks_cluster_name)"
-  nodegroup_name="general"
+  nodegroup_name="$(dev_stack_primary_nodegroup_name "${dev_abs}")"
   repo_root="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
   if ! eks_cluster_exists_in_aws "${cluster_name}"; then
@@ -2504,6 +2513,7 @@ repair_dev_node_join_if_needed() {
     --cluster-name "${cluster_name}" \
     --nodegroup-name "${nodegroup_name}" \
     --region "${AWS_REGION}" &>/dev/null; then
+    echo "Node group ${nodegroup_name} not found in AWS; skipping node join repair."
     return 0
   fi
 
@@ -2966,11 +2976,18 @@ diag_node_join_check_cluster_role_ec2() {
 diagnose_node_join_failure() {
   tf_export_dev_vars
   local cluster_name="${1:-$(eks_cluster_name)}"
-  local nodegroup_name="${2:-general}"
-  local node_role_arn auth_mode
+  local nodegroup_name="${2:-$(dev_stack_primary_nodegroup_name environments/dev)}"
+  local node_role_arn auth_mode all_groups
   local check1=0 check3=0 check4=0 check5=0
 
+  if aws_credentials_expired; then
+    echo "::error::AWS credentials expired — diagnostics below may show false FAIL (IAM/cluster not found, etc.)."
+    echo "Re-run the workflow after refreshing OIDC credentials (CI now uses 3h role duration + refresh before dev apply)."
+  fi
+
+  all_groups="$(dev_stack_nodegroup_names_list environments/dev)"
   echo "=== Node join diagnostics (${cluster_name}/${nodegroup_name}) ==="
+  echo "Configured node groups: ${all_groups} (legacy general checked in AWS if still present)"
   echo "Five-pillar debug: (1) aws-auth  (2) who writes it  (3) node IAM  (4) network  (5) cluster role EC2"
 
   aws eks describe-cluster \
@@ -3161,9 +3178,8 @@ diagnose_node_join_failure() {
 # Scale down / delete node group before terraform destroy (faster, fewer timeouts).
 dev_stack_destroy_prep() {
   tf_export_dev_vars
-  local cluster_name nodegroup_name status
+  local cluster_name nodegroup_name status ng
   cluster_name="$(eks_cluster_name)"
-  nodegroup_name="general"
 
   if [ "${DEV_EKS_PHASE:-}" = "addons-only" ]; then
     echo "dev_eks_phase=addons-only: skipping node group teardown (add-ons-only destroy)."
@@ -3180,42 +3196,47 @@ dev_stack_destroy_prep() {
     return 0
   fi
 
-  if ! aws eks describe-nodegroup \
-    --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" \
-    --region "${AWS_REGION}" &>/dev/null; then
-    echo "Node group ${nodegroup_name} not found; skipping."
-    return 0
-  fi
+  for nodegroup_name in general $(dev_stack_nodegroup_names_list environments/dev); do
+    nodegroup_name="$(echo "${nodegroup_name}" | tr -d ' ')"
+    [ -z "${nodegroup_name}" ] && continue
 
-  status="$(aws eks describe-nodegroup \
-    --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" \
-    --region "${AWS_REGION}" \
-    --query 'nodegroup.status' \
-    --output text)"
-
-  echo "Node group ${nodegroup_name} status=${status}; scaling to 0..."
-  aws eks update-nodegroup-config \
-    --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" \
-    --region "${AWS_REGION}" \
-    --scaling-config "minSize=0,maxSize=0,desiredSize=0" 2>/dev/null || true
-
-  if aws eks wait nodegroup-active \
-    --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" \
-    --region "${AWS_REGION}" 2>/dev/null; then
-    echo "Deleting node group ${nodegroup_name} before Terraform destroy..."
-    aws eks delete-nodegroup \
+    if ! aws eks describe-nodegroup \
       --cluster-name "${cluster_name}" \
       --nodegroup-name "${nodegroup_name}" \
-      --region "${AWS_REGION}" || true
-    aws eks wait nodegroup-deleted \
+      --region "${AWS_REGION}" &>/dev/null; then
+      echo "Node group ${nodegroup_name} not found; skipping."
+      continue
+    fi
+
+    status="$(aws eks describe-nodegroup \
       --cluster-name "${cluster_name}" \
       --nodegroup-name "${nodegroup_name}" \
-      --region "${AWS_REGION}" 2>/dev/null || true
-  fi
+      --region "${AWS_REGION}" \
+      --query 'nodegroup.status' \
+      --output text)"
+
+    echo "Node group ${nodegroup_name} status=${status}; scaling to 0..."
+    aws eks update-nodegroup-config \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" \
+      --scaling-config "minSize=0,maxSize=0,desiredSize=0" 2>/dev/null || true
+
+    if aws eks wait nodegroup-active \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" 2>/dev/null; then
+      echo "Deleting node group ${nodegroup_name} before Terraform destroy..."
+      aws eks delete-nodegroup \
+        --cluster-name "${cluster_name}" \
+        --nodegroup-name "${nodegroup_name}" \
+        --region "${AWS_REGION}" || true
+      aws eks wait nodegroup-deleted \
+        --cluster-name "${cluster_name}" \
+        --nodegroup-name "${nodegroup_name}" \
+        --region "${AWS_REGION}" 2>/dev/null || true
+    fi
+  done
 }
 
 bootstrap_destroy_var_args() {
@@ -3657,11 +3678,10 @@ import_existing_dev_resources() {
     return 0
   fi
 
-  local cluster_name eks_prefix addons_prefix
+  local cluster_name eks_prefix addons_prefix nodegroup_name
   cluster_name="$(eks_cluster_name)"
   eks_prefix="$(dev_eks_state_prefix)"
   addons_prefix="$(dev_addons_state_prefix)"
-  local nodegroup_name="general"
 
   pushd "${dev_abs}" >/dev/null
   mapfile -t var_args < <(tf_var_args)
@@ -3707,15 +3727,19 @@ import_existing_dev_resources() {
     fi
   done
 
-  if aws eks describe-nodegroup \
-    --cluster-name "${cluster_name}" \
-    --nodegroup-name "${nodegroup_name}" \
-    --region "${AWS_REGION}" &>/dev/null; then
-    import_if_missing \
-      "module.eks_node_groups[0].aws_eks_node_group.main[\"${nodegroup_name}\"]" \
-      "${cluster_name}:${nodegroup_name}" \
-      true
-  fi
+  for nodegroup_name in general $(dev_stack_nodegroup_names_list "${dev_abs}"); do
+    nodegroup_name="$(echo "${nodegroup_name}" | tr -d ' ')"
+    [ -z "${nodegroup_name}" ] && continue
+    if aws eks describe-nodegroup \
+      --cluster-name "${cluster_name}" \
+      --nodegroup-name "${nodegroup_name}" \
+      --region "${AWS_REGION}" &>/dev/null; then
+      import_if_missing \
+        "module.eks_node_groups[0].aws_eks_node_group.main[\"${nodegroup_name}\"]" \
+        "${cluster_name}:${nodegroup_name}" \
+        true
+    fi
+  done
 
   popd >/dev/null
 }
@@ -3941,6 +3965,75 @@ dev_stack_output_enabled() {
   terraform output -no-color "${name}" 2>/dev/null | grep -q '^true$'
 }
 
+# Space-separated node group keys (app webapp) from state output or terraform.tfvars.
+dev_stack_nodegroup_names_list() {
+  local dev_abs="${1:-environments/dev}"
+  local did_pushd=false
+  local names=""
+
+  dev_abs="$(resolve_dev_dir "${dev_abs}")"
+  if [ "$(pwd)" != "${dev_abs}" ]; then
+    pushd "${dev_abs}" >/dev/null
+    did_pushd=true
+  fi
+
+  names="$(terraform output -json node_group_ids 2>/dev/null | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, dict) and data:
+        print(' '.join(sorted(data.keys())))
+except Exception:
+    pass
+" 2>/dev/null || true)"
+
+  if [ -z "${names}" ] && [ -f terraform.tfvars ]; then
+    names="$(python3 <<'PY' 2>/dev/null || true
+import re
+text = open("terraform.tfvars").read()
+block = re.search(r"node_groups\s*=\s*\{", text)
+if not block:
+    raise SystemExit(0)
+start = block.end()
+depth = 1
+i = start
+while i < len(text) and depth:
+    if text[i] == "{":
+        depth += 1
+    elif text[i] == "}":
+        depth -= 1
+    i += 1
+inner = text[start : i - 1]
+print(" ".join(re.findall(r"^\s*([A-Za-z0-9_-]+)\s*=\s*\{", inner, re.M)))
+PY
+)"
+  fi
+
+  [ -z "${names}" ] && names="app webapp"
+  echo "${names}"
+  [ "${did_pushd}" = true ] && popd >/dev/null
+}
+
+dev_stack_primary_nodegroup_name() {
+  dev_stack_nodegroup_names_list "${1:-environments/dev}" | awk '{print $1}'
+}
+
+dev_stack_rm_nodegroup_from_state() {
+  local ng="$1"
+  terraform state rm "$(dev_eks_nodes_state_prefix).aws_eks_node_group.main[\"${ng}\"]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_nodes_state_prefix).aws_launch_template.node_group[\"${ng}\"]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_nodes_state_prefix).null_resource.node_group_scale_out[\"${ng}\"]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_state_prefix).aws_eks_node_group.main[\"${ng}\"]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_state_prefix).aws_launch_template.node_group[\"${ng}\"]" 2>/dev/null || true
+  terraform state rm "$(dev_eks_state_prefix).null_resource.node_group_scale_out[\"${ng}\"]" 2>/dev/null || true
+}
+
+aws_credentials_expired() {
+  local err
+  err="$(aws sts get-caller-identity 2>&1 || true)"
+  echo "${err}" | grep -qiE 'ExpiredToken|expired'
+}
+
 # Run post-apply EKS validation (same script as modules/eks-validation).
 # Invoked after every successful environments/dev apply in CI. Skips entirely when no
 # cluster exists; otherwise skips check categories that match disabled EKS phases.
@@ -4009,7 +4102,7 @@ run_eks_post_apply_validation() {
   local private_subnets public_subnets node_groups
   private_subnets="$(terraform output -json private_subnet_ids 2>/dev/null | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)))" 2>/dev/null || true)"
   public_subnets="$(terraform output -json public_subnet_ids 2>/dev/null | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)))" 2>/dev/null || true)"
-  node_groups="$(terraform output -json node_group_ids 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(d.keys()) if isinstance(d,dict) else 'general')" 2>/dev/null || echo "general")"
+  node_groups="$(dev_stack_nodegroup_names_list "${dev_abs}")"
 
   validate_post_node="false"
   if dev_stack_output_enabled enable_addons || dev_stack_output_enabled enable_eks; then

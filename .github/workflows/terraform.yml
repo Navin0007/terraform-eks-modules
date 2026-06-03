@@ -148,7 +148,7 @@ jobs:
     needs: validate
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event.inputs.operation == 'destroy' && 120 || 90 }}
+    timeout-minutes: ${{ github.event.inputs.operation == 'destroy' && 120 || 150 }}
     environment: ${{ vars.TF_ENVIRONMENT || 'dev' }}
     concurrency:
       group: terraform-${{ github.event.inputs.target }}-${{ vars.TF_ENVIRONMENT }}
@@ -162,6 +162,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 10800
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -338,6 +339,14 @@ jobs:
           mapfile -t dev_args < <(tf_dev_extra_var_args)
           terraform plan -input=false -no-color "${var_args[@]}" "${dev_args[@]}"
           popd >/dev/null
+
+      - name: Refresh AWS credentials before dev apply
+        if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'environments/dev')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 10800
 
       - name: Dev apply
         if: inputs.operation == 'apply' && (inputs.target == 'all' || inputs.target == 'environments/dev')

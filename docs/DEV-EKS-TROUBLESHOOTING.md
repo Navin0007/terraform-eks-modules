@@ -905,6 +905,44 @@ Removed redundant Terraform SG rule resources; EKS-managed rules are sufficient.
 
 ---
 
+### 30. `ExpiredToken` during long apply (EBS CSI / state upload)
+
+**Symptoms**
+
+```
+api error ExpiredToken: The provided token has expired
+Error saving state: failed to upload state
+errored.tfstate written locally in environments/dev
+Failed to release the state lock (ExpiredToken)
+```
+
+**Cause**
+
+GitHub Actions OIDC role sessions default to **1 hour**. A full dev apply (node groups + CoreDNS + **EBS CSI** with up to 45m create timeout) can exceed that. When the token expires mid-apply, AWS calls fail and Terraform cannot write state — diagnostics then show misleading **FAIL** (IAM roles “not found”, cluster not ACTIVE, node group `general` NOT_FOUND).
+
+**Fix (in repo)**
+
+- CI: `role-duration-seconds: 10800` (3h) on `configure-aws-credentials`
+- Refresh credentials immediately before **Dev apply**
+- Job timeout increased to 150 minutes for apply
+- Diagnostics use node groups **`app` / `webapp`** (not legacy `general`)
+
+**Recovery after a failed apply**
+
+1. In a shell with **fresh** AWS credentials (re-run the workflow or `aws sso login`):
+   ```bash
+   cd environments/dev
+   terraform init
+   terraform state push errored.tfstate   # only if errored.tfstate exists and is newer than S3
+   ```
+2. If lock is stuck: `terraform force-unlock <LOCK_ID>` (only when no other run is active).
+3. Re-run workflow **apply** with the same `dev_eks_phase` (often `addons` or `all`).
+4. Do **not** run another full apply blindly if `errored.tfstate` was never pushed — you may fork state.
+
+**Note:** EBS CSI “purge previous add-on configuration” warning on replace is expected when the add-on was partially created; a successful re-apply with valid credentials usually completes it.
+
+---
+
 | Symptom | First reference |
 |--------|------------------|
 | KMS alias NotFound on bootstrap init | §1a — `bootstrap_remote_backend_ready` |
@@ -930,4 +968,5 @@ Removed redundant Terraform SG rule resources; EKS-managed rules are sufficient.
 | **Log group already exists** | Issue 22 — `import_eks_foundation_resources`, log group delete on recreate |
 | Add-ons DEGRADED (no Ready nodes) | `modules/addons/*`, `environments/dev/main.tf` `nodes_ready_dependency` |
 | Add-on replace/purge warning | `.github/scripts/terraform-common.sh` `import_existing_dev_resources` |
-| Stale failed node group | `terraform-common.sh` L476–522 |
+| Stale failed node group | `terraform-common.sh` `delete_failed_eks_node_groups` |
+| **ExpiredToken / errored.tfstate** | Issue 30 — refresh OIDC, `state push`, `force-unlock` |
